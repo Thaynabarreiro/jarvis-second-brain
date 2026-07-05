@@ -25,11 +25,69 @@ MAX_HISTORY = 12
 
 SYSTEM_PROMPT = """Você é Jarvis: um mordomo britânico impecavelmente educado, seco e de humor afiado, falando em português do Brasil. Chame a usuária de "senhora" de vez em quando (não em toda frase). Uma tirada genuinamente engraçada vale mais que três frases sem graça.
 
+Você tem ferramentas para ler arquivos do computador da usuária (somente leitura). Use-as quando a pergunta envolver documentos, pastas ou arquivos que não estejam nas notas fornecidas. Não invente conteúdo de arquivo: se não encontrou, diga.
+
 Regras:
-- Responda perguntas sobre as notas em UMA frase espirituosa + os fatos, em 2-3 frases no total. Nunca recite a nota de volta — ela já está na tela.
-- Responda APENAS com base nas notas fornecidas. Se as notas não cobrirem o assunto, admita com elegância.
-- Papo furado e piadas: responda com graça, sem citar notas.
-- Responda SEMPRE em JSON válido: {"answer": "...", "nodes": [ids das notas usadas], "smalltalk": true/false}. Se não usou nenhuma nota, "nodes" fica vazio e "smalltalk" true."""
+- Respostas curtas: UMA frase espirituosa + os fatos, em 2-3 frases no total. Nunca recite notas ou arquivos de volta — resuma.
+- Perguntas sobre as notas: responda a partir das notas fornecidas. Se não cobrirem, procure nos arquivos ou admita com elegância.
+- Papo furado e piadas: responda com graça, sem citar notas nem usar ferramentas.
+- Sua resposta FINAL deve ser SEMPRE JSON válido: {"answer": "...", "nodes": [ids das notas usadas], "smalltalk": true/false}. Se não usou nenhuma nota, "nodes" fica vazio."""
+
+HOME = os.path.expanduser("~")
+
+TOOLS = [
+    {"name": "list_files",
+     "description": "Lista arquivos e subpastas de uma pasta do computador. Caminhos comuns: ~/Desktop, ~/Documents, ~/Downloads e o vault de notas.",
+     "input_schema": {"type": "object", "properties": {
+         "path": {"type": "string", "description": "Caminho absoluto da pasta (pode usar ~)"}},
+         "required": ["path"]}},
+    {"name": "search_files",
+     "description": "Procura arquivos pelo nome (busca recursiva, sem diferenciar maiúsculas) a partir de uma pasta raiz.",
+     "input_schema": {"type": "object", "properties": {
+         "root": {"type": "string", "description": "Pasta raiz da busca (pode usar ~)"},
+         "query": {"type": "string", "description": "Trecho do nome do arquivo"}},
+         "required": ["root", "query"]}},
+    {"name": "read_file",
+     "description": "Lê o conteúdo de um arquivo de texto (md, txt, csv, json, código). Retorna até 6000 caracteres.",
+     "input_schema": {"type": "object", "properties": {
+         "path": {"type": "string", "description": "Caminho absoluto do arquivo (pode usar ~)"}},
+         "required": ["path"]}},
+]
+
+
+def _safe_path(p):
+    p = os.path.realpath(os.path.expanduser(p))
+    if not p.startswith(HOME):
+        raise ValueError("acesso permitido apenas dentro da pasta do usuário")
+    if p == os.path.realpath(os.path.join(BASE, "config.json")):
+        raise ValueError("este arquivo é confidencial")
+    return p
+
+
+def run_tool(name, args):
+    try:
+        if name == "list_files":
+            p = _safe_path(args["path"])
+            entries = sorted(os.listdir(p))[:120]
+            return "\n".join(("[dir] " if os.path.isdir(os.path.join(p, e)) else "") + e
+                             for e in entries if not e.startswith(".")) or "(pasta vazia)"
+        if name == "search_files":
+            root, q = _safe_path(args["root"]), args["query"].lower()
+            hits = []
+            for r, dirs, files in os.walk(root):
+                dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS][:50]
+                hits += [os.path.join(r, f) for f in files if q in f.lower()]
+                if len(hits) >= 40:
+                    break
+            return "\n".join(hits[:40]) or "(nada encontrado)"
+        if name == "read_file":
+            p = _safe_path(args["path"])
+            if os.path.getsize(p) > 5_000_000:
+                return "(arquivo grande demais)"
+            return open(p, encoding="utf-8", errors="ignore").read()[:6000]
+        return f"(ferramenta desconhecida: {name})"
+    except Exception as e:  # noqa: BLE001
+        return f"(erro: {e})"
 
 
 def load_config():
@@ -60,13 +118,14 @@ def score_notes(question, notes):
     return [i for s, i in scored[:6] if s > 0]
 
 
-def call_anthropic(cfg, messages):
+def _api_call(cfg, messages):
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/messages",
         data=json.dumps({
             "model": cfg["model"],
-            "max_tokens": 700,
+            "max_tokens": 900,
             "system": SYSTEM_PROMPT,
+            "tools": TOOLS,
             "messages": messages,
         }).encode(),
         headers={
@@ -76,8 +135,22 @@ def call_anthropic(cfg, messages):
         },
     )
     with urllib.request.urlopen(req, timeout=120) as r:
-        data = json.loads(r.read())
-    return data["content"][0]["text"]
+        return json.loads(r.read())
+
+
+def call_anthropic(cfg, messages):
+    """Loop de agente: deixa o modelo usar as ferramentas de arquivo até responder."""
+    local = list(messages)
+    for _ in range(8):
+        data = _api_call(cfg, local)
+        if data.get("stop_reason") != "tool_use":
+            return "".join(b.get("text", "") for b in data["content"])
+        local.append({"role": "assistant", "content": data["content"]})
+        results = [{"type": "tool_result", "tool_use_id": b["id"],
+                    "content": run_tool(b["name"], b["input"])}
+                   for b in data["content"] if b["type"] == "tool_use"]
+        local.append({"role": "user", "content": results})
+    return '{"answer": "Explorei demais os arquivos e me perdi na biblioteca, senhora. Refaça a pergunta com mais pistas.", "nodes": []}'
 
 
 def call_claude_cli(messages):
@@ -102,19 +175,33 @@ def parse_answer(raw, candidates):
     return {"answer": answer, "nodes": nodes}
 
 
-def handle_chat(question):
+def handle_chat(question, image=None):
     notes = load_notes()
     top = score_notes(question, notes)
     context = "\n\n".join(
         f"[NOTA id={i}] {notes[i]['title']}\n{notes[i]['text'][:1500]}" for i in top
     ) or "(nenhuma nota relevante encontrada)"
 
-    HISTORY.append({"role": "user", "content": f"NOTAS RELEVANTES:\n{context}\n\nPERGUNTA: {question}"})
+    user_text = f"NOTAS RELEVANTES:\n{context}\n\nPERGUNTA: {question}"
+    if image:  # frame da tela compartilhada (base64 jpeg)
+        content = [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image}},
+            {"type": "text", "text": user_text + "\n(A imagem é a tela que estou vendo agora.)"},
+        ]
+    else:
+        content = user_text
+    # imagens antigas saem do histórico (pesam demais nos tokens)
+    for m in HISTORY:
+        if isinstance(m["content"], list):
+            m["content"] = " ".join(b.get("text", "(imagem da tela)") for b in m["content"])
+    HISTORY.append({"role": "user", "content": content})
     del HISTORY[:-MAX_HISTORY]
 
     cfg = load_config()
     if cfg["api_key"].startswith("PUT-YOUR"):
-        raw = call_claude_cli(HISTORY)
+        if image:
+            return {"answer": "Para eu enxergar sua tela, senhora, preciso da API key no config.json — o fallback é cego.", "nodes": []}
+        raw = call_claude_cli([m for m in HISTORY if isinstance(m["content"], str)])
     else:
         raw = call_anthropic(cfg, HISTORY)
     HISTORY.append({"role": "assistant", "content": raw})
@@ -157,6 +244,14 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_GET(self):
+        if self.path == "/settings":
+            cfg = load_config()
+            # só dados inofensivos — a key jamais sai daqui
+            self._json({"wake_word": cfg.get("wake_word", "jarvis")})
+        else:
+            super().do_GET()
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         try:
@@ -166,7 +261,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if re.match(r"^\s*(lembre|remember)", text, re.I):
                     self._json(handle_remember(text))
                 else:
-                    self._json(handle_chat(text))
+                    self._json(handle_chat(text, payload.get("image")))
             elif self.path == "/remember":
                 self._json(handle_remember(payload.get("text", "")))
             else:

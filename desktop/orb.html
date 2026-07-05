@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+  html,body{margin:0;background:transparent;overflow:hidden;height:100%}
+  canvas{display:block;cursor:pointer}
+</style></head>
+<body>
+<canvas id="orb" width="340" height="340" style="width:170px;height:170px"></canvas>
+<script>
+const octx=document.getElementById('orb').getContext('2d');
+let state='idle',amp=0,ampTarget=0;
+const PTS=[];
+for(let i=0;i<420;i++){const y=1-(i/419)*2,r=Math.sqrt(1-y*y),th=i*2.399963;
+  PTS.push({x:Math.cos(th)*r,y,z:Math.sin(th)*r});}
+let rotY=0,rotX=0;
+function frame(t){
+  if(state==='speaking')ampTarget=.35+.65*Math.abs(Math.sin(t/90)+Math.sin(t/37)*.5)/1.5;
+  else if(state==='listening')ampTarget=.3+.4*Math.abs(Math.sin(t/140));
+  else if(state==='thinking')ampTarget=.25+.15*Math.sin(t/300);
+  else ampTarget=.08;
+  amp+=(ampTarget-amp)*.12;rotY+=.004+amp*.02;rotX=Math.sin(t/4000)*.35;
+  const W=340,C=W/2,base=58+amp*30;
+  octx.clearRect(0,0,W,W);
+  const hue=state==='listening'?350:state==='thinking'?270:205;
+  const g=octx.createRadialGradient(C,C,base*.3,C,C,base*1.9);
+  g.addColorStop(0,`hsla(${hue},90%,65%,${.28+amp*.3})`);g.addColorStop(1,'transparent');
+  octx.fillStyle=g;octx.fillRect(0,0,W,W);
+  const cy=Math.cos(rotY),sy=Math.sin(rotY),cx=Math.cos(rotX),sx=Math.sin(rotX);
+  for(const p of PTS){
+    let x=p.x*cy+p.z*sy,z=-p.x*sy+p.z*cy,y=p.y*cx-z*sx;z=p.y*sx+z*cx;
+    const wob=1+amp*.35*Math.sin(t/120+p.y*6+p.x*4);
+    const R=base*wob,px=C+x*R,py=C+y*R,d=(z+1)/2;
+    octx.fillStyle=`hsla(${hue},85%,${55+d*35}%,${.15+d*.75})`;
+    octx.beginPath();octx.arc(px,py,.7+d*2+amp*1.4,0,7);octx.fill();
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+setInterval(async()=>{ // sincroniza com o daemon
+  try{const s=await window.pywebview.api.get_state();state=s.mode;}catch(e){}
+},250);
+document.getElementById('orb').addEventListener('click',()=>{ // clique = acordar / interromper
+  try{window.pywebview.api.wake();}catch(e){}
+});
+</script>
+</body></html>

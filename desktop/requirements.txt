@@ -1,0 +1,10 @@
+anthropic
+edge-tts
+faster-whisper
+openwakeword
+sounddevice
+soundfile
+numpy
+mss
+pillow
+pywebview

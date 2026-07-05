@@ -1,84 +1,110 @@
-# Jarvis — Segundo Cérebro com Voz 🎩
+# Jarvis — System-Wide AI Butler 🎩
 
-Galáxia 3D das suas notas em markdown + assistente de voz (mordomo britânico) que responde
-a partir delas, voa a câmera até a nota-fonte e cria notas novas por voz ("lembre que…").
+A professional, open-source-stack voice assistant that runs on your machine — not in a browser
+tab. Say **"Hey Jarvis"** from any app, and a floating particle orb wakes up, listens, thinks,
+and talks back. It knows your notes, sees your screen, runs commands, downloads files, and
+remembers what you teach it.
 
-Só precisa de **Python 3** e **Google Chrome**. Sem npm, sem instalação de pacotes.
+Two versions live in this repo:
 
-## Como funciona
+| Version | What it is | Needs |
+|---|---|---|
+| **Desktop (recommended)** — `desktop/` | System-wide daemon: wake word, offline speech-to-text, neural voice, floating always-on-top orb, shell + screen + notes + memory tools | Python 3.10+, an Anthropic API key |
+| **Web galaxy** — `viewer/` + `server.py` | 3D knowledge galaxy of your notes in Chrome with voice chat and fly-to-source camera | Python 3, Chrome |
 
-| Arquivo | Papel |
-|---|---|
-| `build.py` | escaneia suas notas `.md` e gera `viewer/graph-data.js` (a galáxia) |
-| `server.py` | servidor local (porta 4700) com os endpoints `/chat` e `/remember` |
-| `viewer/index.html` | a interface: galáxia 3D, chat, microfone e voz |
-| `config.json` | sua API key, modelo e caminho da pasta de notas (fica só na sua máquina) |
+## The stack (all open source except the brain)
 
-A API key nunca vai para o navegador — só o servidor a lê. Sem API key, o `/chat`
-usa `claude -p` (assinatura do Claude Code) como fallback.
+- [openWakeWord](https://github.com/dscripka/openWakeWord) — "Hey Jarvis" detection, fully offline
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — speech-to-text, fully offline
+- [edge-tts](https://github.com/rany2/edge-tts) — natural neural voices, free
+- [pywebview](https://github.com/r0x0r/pywebview) — the floating orb overlay
+- **Anthropic API** — the agentic brain, with tools:
+  - `run_command` — shell access: download files, open apps, manage files (destructive commands are blocked)
+  - `screenshot` — native screen capture of whatever is on screen, any app, no sharing dialogs
+  - `search_notes` — searches your markdown second brain (Obsidian vault etc.)
+  - `remember` — long-term memory file that persists across sessions
+
+Wake it three ways: say **"Hey Jarvis"**, **clap twice**, or **click the orb**.
+Speak over it ("Hey Jarvis…") to interrupt mid-sentence.
 
 ---
 
-## 🪟 Instalação no Windows (passo a passo)
+## 🔑 API keys you need (this is the complete list)
 
-### 1. Instale o Python 3
-- Baixe em <https://www.python.org/downloads/windows/>
-- **IMPORTANTE:** na primeira tela do instalador, marque a caixa **"Add python.exe to PATH"**.
+**One key. That's it: an Anthropic API key.**
 
-### 2. Baixe este projeto
-- Neste repositório no GitHub: botão verde **Code → Download ZIP**
-- Extraia o ZIP para uma pasta fácil, ex.: `C:\jarvis`
+1. Create it at <https://console.anthropic.com> → API Keys ($5 of credit goes a long way).
+2. After running the installer, open `~/.jarvis/config.json` (Mac) or
+   `C:\Users\YOU\.jarvis\config.json` (Windows) and paste it into `"api_key"`.
+   Type it into the file yourself — never paste API keys into chat windows or websites.
 
-### 3. Configure
-- Na pasta, copie `config.example.json` e renomeie a cópia para `config.json`
-- Abra o `config.json` no Bloco de Notas e edite:
+Everything else (wake word, speech-to-text, voice, orb) is free and runs locally.
+No OpenAI key, no ElevenLabs, no subscriptions.
+
+---
+
+## 🍎 Mac install
+
+```bash
+cd desktop
+./install.sh          # one time: creates ~/.jarvis/venv, downloads models
+```
+
+Put your API key in `~/.jarvis/config.json`, then double-click **`Jarvis-Desktop.command`**
+(first time: right-click → Open). macOS will ask for **Microphone** and **Screen Recording**
+permissions — allow both (System Settings → Privacy & Security).
+
+## 🪟 Windows install
+
+1. Install Python 3.10+ from <https://www.python.org/downloads/windows/> —
+   check **"Add python.exe to PATH"** in the installer.
+2. Download this repo: green **Code → Download ZIP** button, extract to e.g. `C:\jarvis`.
+3. Double-click `desktop\install.bat` (one time, downloads ~600 MB of local models).
+4. Put your API key in `C:\Users\YOU\.jarvis\config.json`.
+5. Double-click `desktop\start-jarvis-desktop.bat`. Allow microphone access if asked.
+
+## ⚙️ config.json reference
 
 ```json
 {
-  "api_key": "SUA-CHAVE-AQUI",
+  "api_key": "sk-ant-…",
   "model": "claude-opus-4-8",
-  "notes_dir": "C:\\Users\\SEU_USUARIO\\Documents\\MinhasNotas"
+  "voice": "pt-BR-AntonioNeural",
+  "language": "pt",
+  "notes_dir": "/path/to/your/obsidian/vault",
+  "user_title": "senhora"
 }
 ```
 
-- `api_key`: crie em <https://console.anthropic.com> (US$ 5 de crédito duram muito).
-  Digite a chave você mesmo no arquivo — nunca cole a chave em chats.
-- `notes_dir`: caminho da pasta com suas notas `.md` (vault do Obsidian, por exemplo).
-  No Windows use barra dupla `\\` como no exemplo. Se deixar `""`, ele usa a pasta `notes/` do projeto —
-  crie alguns arquivos `.md` dentro dela para começar.
+- `voice`: any edge-tts voice (`edge-tts --list-voices`), e.g. `en-GB-RyanNeural` for English
+- `language`: speech-recognition language (`pt`, `en`, …)
+- `notes_dir`: your markdown notes folder; leave `""` to disable notes search
+- `user_title`: how the butler addresses you (`sir`, `senhora`, …)
 
-### 4. Rode
-Abra o **Prompt de Comando** (tecla Windows → digite `cmd`) e execute:
+## Try saying
 
-```bat
-cd C:\jarvis
-python build.py
-python server.py
-```
-
-### 5. Abra no Chrome
-Acesse <http://localhost:4700> **no Google Chrome** (o microfone e a voz precisam dele).
-
-- Clique uma vez na página → ele dá as boas-vindas em voz alta
-- Clique no 🎙, fale sua pergunta em português → ele responde falando e voa até a nota
-- Diga ou digite **"lembre que [qualquer coisa]"** → nasce uma nota nova na galáxia
-
-### Atualizar a galáxia depois de editar notas
-Rode `python build.py` de novo e recarregue a página (Ctrl+Shift+R).
+- "Hey Jarvis — what's on my screen right now?"
+- "Hey Jarvis — search my notes for the pricing strategy."
+- "Hey Jarvis — download the latest n8n release to my Downloads folder."
+- "Hey Jarvis — remember that my husband's laptop uses the English voice."
 
 ---
 
-## Problemas comuns
+## Web galaxy version (bonus)
 
-| Sintoma | Solução |
+The original 3D knowledge galaxy still works: `python3 build.py && python3 server.py`,
+then open <http://localhost:4700> in Chrome. Same `config.example.json` → `config.json` setup
+in the repo root. See commit history for its full feature set (wake word in browser,
+clap detection, screen sharing, remember-that notes).
+
+## Troubleshooting
+
+| Symptom | Fix |
 |---|---|
-| Mic não funciona | Chrome → cadeado na barra de endereço → permitir Microfone |
-| Sem som | Clique na página uma vez antes (navegador bloqueia áudio sem interação) |
-| Página desatualizada | Ctrl+Shift+R (Windows) / Cmd+Shift+R (Mac) |
-| Resposta genérica | Confira o `notes_dir` no `config.json` e rode `python build.py` de novo |
-| `python` não reconhecido | Reinstale o Python marcando "Add to PATH" |
+| Orb doesn't hear you | Check OS microphone permission for the terminal/Python |
+| "Screen recording" black images (Mac) | System Settings → Privacy → Screen Recording → allow Python |
+| Voice sounds wrong language | Set `voice` and `language` in config.json |
+| First answer is slow | Models warm up on first run; it gets faster |
+| `python` not recognized (Win) | Reinstall Python with "Add to PATH" checked |
 
----
-
-Baseado no prompt pack "Build Your Own Jarvis" (Zubair Trabzada · AI Workshop),
-construído com Claude Code.
+Built with Claude Code. Wake-word, STT, TTS and overlay are fully open source.

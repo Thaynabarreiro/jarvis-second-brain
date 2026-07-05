@@ -15,23 +15,29 @@
   #bar{position:absolute;left:50%;bottom:26px;transform:translateX(-50%);display:flex;gap:10px;align-items:center;background:rgba(8,14,28,.85);backdrop-filter:blur(10px);border:1px solid #1e3a5f;border-radius:30px;padding:8px 10px 8px 22px;width:min(620px,86vw);box-shadow:0 0 40px rgba(60,140,255,.15)}
   #q{flex:1;background:none;border:none;outline:none;color:#e6f3ff;font-size:15px}
   #q::placeholder{color:#4a6a90}
-  #mic,#send{width:40px;height:40px;border-radius:50%;border:1px solid #2a4d78;background:#0d1b30;color:#7fd4ff;font-size:17px;cursor:pointer;transition:.2s}
+  #mic,#send,#hf,#scr{width:40px;height:40px;border-radius:50%;border:1px solid #2a4d78;background:#0d1b30;color:#7fd4ff;font-size:17px;cursor:pointer;transition:.2s}
   #mic.rec{background:#7a1525;border-color:#ff5470;color:#ffd4dc;animation:pulse 1.2s infinite}
+  #hf.on{background:#0f4d2e;border-color:#37d67a;color:#c8ffdf;animation:pulse 2.4s infinite}
+  #scr.on{background:#123a5c;border-color:#4aa8ff;color:#dceeff}
   @keyframes pulse{50%{box-shadow:0 0 0 10px rgba(255,84,112,.12)}}
   #status{position:absolute;left:50%;bottom:86px;transform:translateX(-50%);font-size:12px;letter-spacing:2px;color:#6fb8ff;text-transform:uppercase;opacity:0;transition:opacity .3s}
   #status.on{opacity:1}
   #answer{position:absolute;left:50%;bottom:110px;transform:translateX(-50%);max-width:min(600px,84vw);background:rgba(8,18,36,.92);border:1px solid #2a4d78;border-radius:14px;padding:14px 18px;font-size:14px;line-height:1.6;color:#dbeeff;opacity:0;transition:opacity .4s;pointer-events:none}
   #answer.on{opacity:1;pointer-events:auto}
+  #orb{position:absolute;right:26px;bottom:26px;width:150px;height:150px;pointer-events:none;filter:drop-shadow(0 0 24px rgba(80,170,255,.35))}
 </style>
 </head>
 <body>
 <div id="graph"></div>
 <div id="panel"><button onclick="closePanel()">✕</button><h2 id="p-title"></h2><div class="group" id="p-group"></div><p id="p-body"></p></div>
+<canvas id="orb" width="300" height="300"></canvas>
 <div id="answer"></div>
 <div id="status"></div>
 <div id="bar">
   <input id="q" placeholder="Pergunte à sua galáxia, senhora…" autocomplete="off">
   <button id="mic" title="Falar">🎙</button>
+  <button id="hf" title="Mãos livres: palavra-chave ou duas palmas">👂</button>
+  <button id="scr" title="Compartilhar tela com o Jarvis">🖥</button>
   <button id="send" title="Enviar">➤</button>
 </div>
 <script src="https://unpkg.com/3d-force-graph@1.73.4/dist/3d-force-graph.min.js"></script>
@@ -97,6 +103,44 @@ function showPanel(n){
 }
 function closePanel(){document.getElementById('panel').classList.remove('open');highlighted=new Set();Graph.refresh();}
 
+// ---------- esfera-assistente ----------
+const orbCanvas=document.getElementById('orb'),octx=orbCanvas.getContext('2d');
+let orbState='idle'; // idle | speaking | listening | thinking
+let amp=0,ampTarget=0;
+const ORB_PTS=[];
+for(let i=0;i<420;i++){ // pontos distribuídos na esfera (espiral de Fibonacci)
+  const y=1-(i/419)*2,r=Math.sqrt(1-y*y),th=i*2.399963;
+  ORB_PTS.push({x:Math.cos(th)*r,y,z:Math.sin(th)*r});
+}
+let rotY=0,rotX=0;
+function orbFrame(t){
+  // alvo de amplitude conforme o estado
+  if(orbState==='speaking')ampTarget=.35+.65*Math.abs(Math.sin(t/90)+Math.sin(t/37)*.5)/1.5;
+  else if(orbState==='listening')ampTarget=.3+.4*Math.abs(Math.sin(t/140));
+  else if(orbState==='thinking')ampTarget=.25+.15*Math.sin(t/300);
+  else ampTarget=.08;
+  amp+=(ampTarget-amp)*.12;
+  rotY+=.004+amp*.02;rotX=Math.sin(t/4000)*.35;
+  const W=300,C=W/2,base=52+amp*26;
+  octx.clearRect(0,0,W,W);
+  // halo
+  const g=octx.createRadialGradient(C,C,base*.3,C,C,base*1.9);
+  const hue=orbState==='listening'?350:orbState==='thinking'?270:205;
+  g.addColorStop(0,`hsla(${hue},90%,65%,${.28+amp*.3})`);g.addColorStop(1,'transparent');
+  octx.fillStyle=g;octx.fillRect(0,0,W,W);
+  // partículas
+  const cy=Math.cos(rotY),sy=Math.sin(rotY),cx=Math.cos(rotX),sx=Math.sin(rotX);
+  for(const p of ORB_PTS){
+    let x=p.x*cy+p.z*sy,z=-p.x*sy+p.z*cy,y=p.y*cx-z*sx;z=p.y*sx+z*cx;
+    const wob=1+amp*.35*Math.sin(t/120+p.y*6+p.x*4); // "se mexe" com o áudio
+    const R=base*wob,px=C+x*R,py=C+y*R,depth=(z+1)/2;
+    octx.fillStyle=`hsla(${hue},85%,${55+depth*35}%,${.15+depth*.75})`;
+    octx.beginPath();octx.arc(px,py,.6+depth*1.7+amp*1.2,0,7);octx.fill();
+  }
+  requestAnimationFrame(orbFrame);
+}
+requestAnimationFrame(orbFrame);
+
 // ---------- voz ----------
 let voice=null,audioReady=false;
 function pickVoice(){
@@ -111,6 +155,8 @@ function speak(text){
   const u=new SpeechSynthesisUtterance(text);
   const vs=speechSynthesis.getVoices();
   u.voice=vs.find(v=>/pt-BR/i.test(v.lang))||voice;u.rate=1.04;u.pitch=.92;
+  u.onstart=()=>{orbState='speaking';};
+  u.onend=u.onerror=()=>{orbState='idle';};
   speechSynthesis.speak(u);
 }
 document.addEventListener('pointerdown',()=>{ if(!audioReady){audioReady=true;
@@ -128,19 +174,22 @@ function showAnswer(t){const a=document.getElementById('answer');a.textContent=t
 
 async function ask(question){
   if(!question.trim())return;
-  setStatus('● pensando…');
+  setStatus('● pensando…');orbState='thinking';
   try{
+    const payload={question};
+    const img=await grabScreenFrame(question);
+    if(img)payload.image=img;
     const r=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({question})});
+      body:JSON.stringify(payload)});
     const d=await r.json();
-    setStatus('');
+    setStatus('');orbState='idle';
     showAnswer(d.answer);speak(d.answer);
     if(d.graph){ // nota nova nasceu (remember)
       bornStar(d);return;
     }
     if(d.nodes&&d.nodes.length>=4){lightCluster(d.nodes);}
     else if(d.nodes&&d.nodes.length){const n=data.nodes.find(x=>x.id===d.nodes[0]);if(n)flyTo(n,true);}
-  }catch(e){setStatus('');showAnswer('O servidor não respondeu, senhora. Ele ainda está de pé?');}
+  }catch(e){setStatus('');orbState='idle';showAnswer('O servidor não respondeu, senhora. Ele ainda está de pé?');}
 }
 function bornStar(d){
   const nb=d.neighbor!=null?data.nodes.find(n=>n.id===d.neighbor):null;
@@ -163,12 +212,99 @@ let rec=null;
 if('webkitSpeechRecognition' in window){
   rec=new webkitSpeechRecognition();rec.lang='pt-BR';rec.interimResults=false;
   rec.onresult=e=>{const t=e.results[0][0].transcript;q.value=t;setStatus('');ask(t);q.value='';};
-  rec.onend=()=>{micBtn.classList.remove('rec');if(!q.value)setStatus('');};
-  rec.onerror=()=>{setStatus('');micBtn.classList.remove('rec');showAnswer('O microfone se recusou a cooperar, senhora. Verifique a permissão no Chrome.');};
-  micBtn.onclick=()=>{speechSynthesis.cancel();micBtn.classList.add('rec');setStatus('● escutando…');rec.start();};
+  rec.onend=()=>{micBtn.classList.remove('rec');if(orbState==='listening')orbState='idle';if(!q.value)setStatus('');};
+  rec.onerror=()=>{setStatus('');orbState='idle';micBtn.classList.remove('rec');showAnswer('O microfone se recusou a cooperar, senhora. Verifique a permissão no Chrome.');};
+  micBtn.onclick=()=>{speechSynthesis.cancel();micBtn.classList.add('rec');setStatus('● escutando…');orbState='listening';rec.start();};
 }else{
   micBtn.onclick=()=>showAnswer('Este navegador não tem reconhecimento de voz — use o Chrome, senhora.');
 }
+
+// ---------- compartilhamento de tela ----------
+let screenStream=null,screenVideo=null;
+const scrBtn=document.getElementById('scr');
+scrBtn.onclick=async()=>{
+  if(screenStream){screenStream.getTracks().forEach(t=>t.stop());screenStream=null;scrBtn.classList.remove('on');
+    showAnswer('Deixei de ver sua tela, senhora.');return;}
+  try{
+    screenStream=await navigator.mediaDevices.getDisplayMedia({video:true});
+    screenVideo=document.createElement('video');screenVideo.srcObject=screenStream;await screenVideo.play();
+    screenStream.getVideoTracks()[0].onended=()=>{screenStream=null;scrBtn.classList.remove('on');};
+    scrBtn.classList.add('on');
+    const m='Vejo sua tela agora, senhora. Pergunte quando quiser.';showAnswer(m);speak(m);
+  }catch(e){showAnswer('Compartilhamento cancelado, senhora.');}
+};
+const SCREEN_WORDS=/\b(tela|screen|vendo|olha|olhando|enxerga|aba|janela)\b/i;
+async function grabScreenFrame(question){
+  if(!screenStream||!SCREEN_WORDS.test(question))return null;
+  const c=document.createElement('canvas');
+  c.width=Math.min(1568,screenVideo.videoWidth);c.height=Math.round(c.width*screenVideo.videoHeight/screenVideo.videoWidth);
+  c.getContext('2d').drawImage(screenVideo,0,0,c.width,c.height);
+  return c.toDataURL('image/jpeg',.8).split(',')[1];
+}
+
+// ---------- mãos livres: palavra-chave + duas palmas ----------
+let WAKE='jarvis';
+fetch('/settings').then(r=>r.json()).then(s=>{if(s.wake_word)WAKE=s.wake_word.toLowerCase();}).catch(()=>{});
+const hfBtn=document.getElementById('hf');
+let hfOn=false,hfRec=null,awaiting=false,awaitTimer=null;
+function norm(s){return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');}
+function wakeUp(){ // ativado por palavra-chave ou palmas
+  if(speechSynthesis.speaking)speechSynthesis.cancel();
+  awaiting=true;orbState='listening';setStatus('● às ordens…');
+  speak('Sim, senhora?');
+  clearTimeout(awaitTimer);awaitTimer=setTimeout(()=>{awaiting=false;orbState='idle';setStatus('');},12000);
+}
+if('webkitSpeechRecognition' in window){
+  hfRec=new webkitSpeechRecognition();hfRec.lang='pt-BR';hfRec.continuous=true;hfRec.interimResults=false;
+  hfRec.onresult=e=>{
+    if(speechSynthesis.speaking)return; // não se escuta no espelho
+    const t=e.results[e.results.length-1][0].transcript.trim();
+    const nt=norm(t),nw=norm(WAKE);
+    if(nt.includes(nw)){
+      const after=t.slice(nt.indexOf(nw)+nw.length).replace(/^[,.!?\s]+/,'');
+      if(after.trim()){awaiting=false;clearTimeout(awaitTimer);ask(after);}
+      else wakeUp();
+    }else if(awaiting){awaiting=false;clearTimeout(awaitTimer);setStatus('');ask(t);}
+  };
+  hfRec.onend=()=>{if(hfOn)try{hfRec.start();}catch(e){}}; // religa sozinho
+  hfRec.onerror=e=>{if(e.error==='not-allowed'){hfOn=false;hfBtn.classList.remove('on');
+    showAnswer('Preciso da permissão do microfone para o modo mãos livres, senhora.');}};
+}
+// detector de palmas: dois picos de volume próximos
+let clapCtx=null;
+async function startClaps(){
+  const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+  clapCtx=new AudioContext();
+  const src=clapCtx.createMediaStreamSource(stream),an=clapCtx.createAnalyser();
+  an.fftSize=512;src.connect(an);
+  const buf=new Uint8Array(an.frequencyBinCount);
+  let lastClap=0,level=0;
+  (function tick(){
+    if(!hfOn){stream.getTracks().forEach(t=>t.stop());clapCtx.close();clapCtx=null;return;}
+    an.getByteTimeDomainData(buf);
+    let peak=0;for(const v of buf)peak=Math.max(peak,Math.abs(v-128)/128);
+    level=level*.95+peak*.05; // média do ambiente
+    if(peak>Math.max(.45,level*3)&&!speechSynthesis.speaking){
+      const now=performance.now();
+      if(now-lastClap>120&&now-lastClap<700){wakeUp();lastClap=0;}
+      else lastClap=now;
+    }
+    requestAnimationFrame(tick);
+  })();
+}
+hfBtn.onclick=async()=>{
+  if(!hfRec){showAnswer('Modo mãos livres só no Chrome, senhora.');return;}
+  hfOn=!hfOn;hfBtn.classList.toggle('on',hfOn);
+  if(hfOn){
+    try{hfRec.start();}catch(e){}
+    try{await startClaps();}catch(e){/* sem palmas, palavra-chave ainda funciona */}
+    const m=`Mãos livres ligado, senhora. Diga "${WAKE}" ou bata duas palmas.`;showAnswer(m);speak(m);
+  }else{
+    try{hfRec.stop();}catch(e){}
+    setStatus('');awaiting=false;orbState='idle';
+    showAnswer('Mãos livres desligado, senhora.');
+  }
+};
 </script>
 </body>
 </html>
