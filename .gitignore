@@ -1,0 +1,6 @@
+# nunca subir conteúdo pessoal
+notes/
+viewer/graph-data.js
+config.json
+__pycache__/
+.DS_Store

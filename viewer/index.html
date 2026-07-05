@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Jarvis — Galáxia do Conhecimento</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:-apple-system,'Segoe UI',sans-serif;color:#cfe8ff}
+  #graph{position:absolute;inset:0}
+  #panel{position:absolute;top:0;right:0;width:320px;max-height:100%;overflow:auto;background:rgba(8,14,28,.88);backdrop-filter:blur(8px);border-left:1px solid #1e3a5f;padding:20px;box-sizing:border-box;transform:translateX(100%);transition:transform .4s}
+  #panel.open{transform:none}
+  #panel h2{margin:0 0 4px;font-size:17px;color:#7fd4ff}
+  #panel .group{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:#5a7fa8;margin-bottom:12px}
+  #panel p{font-size:13px;line-height:1.6;color:#b8d4ee;white-space:pre-wrap}
+  #panel button{background:none;border:none;color:#5a7fa8;float:right;cursor:pointer;font-size:16px}
+  #bar{position:absolute;left:50%;bottom:26px;transform:translateX(-50%);display:flex;gap:10px;align-items:center;background:rgba(8,14,28,.85);backdrop-filter:blur(10px);border:1px solid #1e3a5f;border-radius:30px;padding:8px 10px 8px 22px;width:min(620px,86vw);box-shadow:0 0 40px rgba(60,140,255,.15)}
+  #q{flex:1;background:none;border:none;outline:none;color:#e6f3ff;font-size:15px}
+  #q::placeholder{color:#4a6a90}
+  #mic,#send{width:40px;height:40px;border-radius:50%;border:1px solid #2a4d78;background:#0d1b30;color:#7fd4ff;font-size:17px;cursor:pointer;transition:.2s}
+  #mic.rec{background:#7a1525;border-color:#ff5470;color:#ffd4dc;animation:pulse 1.2s infinite}
+  @keyframes pulse{50%{box-shadow:0 0 0 10px rgba(255,84,112,.12)}}
+  #status{position:absolute;left:50%;bottom:86px;transform:translateX(-50%);font-size:12px;letter-spacing:2px;color:#6fb8ff;text-transform:uppercase;opacity:0;transition:opacity .3s}
+  #status.on{opacity:1}
+  #answer{position:absolute;left:50%;bottom:110px;transform:translateX(-50%);max-width:min(600px,84vw);background:rgba(8,18,36,.92);border:1px solid #2a4d78;border-radius:14px;padding:14px 18px;font-size:14px;line-height:1.6;color:#dbeeff;opacity:0;transition:opacity .4s;pointer-events:none}
+  #answer.on{opacity:1;pointer-events:auto}
+</style>
+</head>
+<body>
+<div id="graph"></div>
+<div id="panel"><button onclick="closePanel()">✕</button><h2 id="p-title"></h2><div class="group" id="p-group"></div><p id="p-body"></p></div>
+<div id="answer"></div>
+<div id="status"></div>
+<div id="bar">
+  <input id="q" placeholder="Pergunte à sua galáxia, senhora…" autocomplete="off">
+  <button id="mic" title="Falar">🎙</button>
+  <button id="send" title="Enviar">➤</button>
+</div>
+<script src="https://unpkg.com/3d-force-graph@1.73.4/dist/3d-force-graph.min.js"></script>
+<script src="graph-data.js"></script>
+<script>
+const PALETTE=['#6fb8ff','#ffb36f','#8dff9e','#ff7fd4','#c69fff','#fff56f','#7ffcff','#ff8a7a'];
+const groups=[...new Set(GRAPH.nodes.map(n=>n.group))];
+const colorOf=g=>PALETTE[groups.indexOf(g)%PALETTE.length];
+let highlighted=new Set(), data={nodes:GRAPH.nodes.map(n=>({...n})),links:GRAPH.links.map(l=>({...l}))};
+
+const Graph=ForceGraph3D()(document.getElementById('graph'))
+  .graphData(data)
+  .backgroundColor('#000004')
+  .nodeLabel(n=>n.label)
+  .nodeColor(n=>highlighted.size&&!highlighted.has(n.id)?'rgba(60,80,110,.25)':colorOf(n.group))
+  .nodeOpacity(.95).nodeResolution(16)
+  .nodeVal(n=>highlighted.has(n.id)?9:4)
+  .linkColor(l=>highlighted.has(l.source.id)&&highlighted.has(l.target.id)?'#7fd4ff':'rgba(80,120,180,.18)')
+  .linkWidth(l=>highlighted.has(l.source.id)&&highlighted.has(l.target.id)?1.6:.4)
+  .onNodeClick(n=>flyTo(n,true))
+  .width(window.innerWidth).height(window.innerHeight);
+window.addEventListener('resize',()=>Graph.width(window.innerWidth).height(window.innerHeight));
+
+// starfield
+setTimeout(()=>{
+  try{
+    const scene=Graph.scene();
+    const g=new window.THREE.BufferGeometry();
+    const N=3000,pos=new Float32Array(N*3);
+    for(let i=0;i<N*3;i++)pos[i]=(Math.random()-0.5)*4000;
+    g.setAttribute('position',new window.THREE.BufferAttribute(pos,3));
+    scene.add(new window.THREE.Points(g,new window.THREE.PointsMaterial({color:0x88aaff,size:1.2,transparent:true,opacity:.6})));
+  }catch(e){/* sem starfield, sem drama */}
+},800);
+
+// idle drift
+let idle=true;let angle=0;
+setInterval(()=>{if(!idle)return;angle+=0.0006;
+  Graph.cameraPosition({x:600*Math.sin(angle),z:600*Math.cos(angle)});},30);
+['pointerdown','wheel'].forEach(e=>document.getElementById('graph').addEventListener(e,()=>{idle=false;}));
+
+function neighborsOf(id){
+  const s=new Set([id]);
+  GRAPH.links.forEach(l=>{if(l.source===id)s.add(l.target);if(l.target===id)s.add(l.source);});
+  return s;
+}
+function flyTo(node,openSide){
+  idle=false;
+  highlighted=neighborsOf(node.id);Graph.refresh();
+  const obj=data.nodes.find(n=>n.id===node.id);
+  const d=90,r=1+d/Math.hypot(obj.x||1,obj.y||1,obj.z||1);
+  Graph.cameraPosition({x:obj.x*r,y:obj.y*r,z:obj.z*r},obj,1800);
+  if(openSide)showPanel(obj);
+}
+function lightCluster(ids){
+  idle=false;highlighted=new Set(ids);ids.forEach(i=>neighborsOf(i).forEach(x=>highlighted.add(x)));Graph.refresh();
+}
+function showPanel(n){
+  document.getElementById('p-title').textContent=n.label;
+  document.getElementById('p-group').textContent=n.group;
+  document.getElementById('p-body').textContent=n.excerpt;
+  document.getElementById('panel').classList.add('open');
+}
+function closePanel(){document.getElementById('panel').classList.remove('open');highlighted=new Set();Graph.refresh();}
+
+// ---------- voz ----------
+let voice=null,audioReady=false;
+function pickVoice(){
+  const vs=speechSynthesis.getVoices();
+  voice=vs.find(v=>/en-GB/i.test(v.lang)&&/male|Daniel|Arthur/i.test(v.name))
+      ||vs.find(v=>/pt-BR/i.test(v.lang))||vs.find(v=>/en-GB/i.test(v.lang))||vs[0]||null;
+}
+speechSynthesis.onvoiceschanged=pickVoice;pickVoice();
+function speak(text){
+  if(!audioReady)return;
+  speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance(text);
+  const vs=speechSynthesis.getVoices();
+  u.voice=vs.find(v=>/pt-BR/i.test(v.lang))||voice;u.rate=1.04;u.pitch=.92;
+  speechSynthesis.speak(u);
+}
+document.addEventListener('pointerdown',()=>{ if(!audioReady){audioReady=true;
+  const u=new SpeechSynthesisUtterance(' ');speechSynthesis.speak(u);} },{once:true});
+
+// boot greeting
+let greeted=false;
+document.addEventListener('pointerdown',()=>{ if(!greeted){greeted=true;
+  const msg=`Boa noite, senhora. ${GRAPH.nodes.length} notas indexadas, todas presentes e devidamente contabilizadas.`;
+  setTimeout(()=>{showAnswer(msg);speak(msg);},300);} },{once:true});
+
+function setStatus(t){const s=document.getElementById('status');s.textContent=t;s.classList.toggle('on',!!t);}
+function showAnswer(t){const a=document.getElementById('answer');a.textContent=t;a.classList.add('on');
+  clearTimeout(showAnswer._t);showAnswer._t=setTimeout(()=>a.classList.remove('on'),14000);}
+
+async function ask(question){
+  if(!question.trim())return;
+  setStatus('● pensando…');
+  try{
+    const r=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question})});
+    const d=await r.json();
+    setStatus('');
+    showAnswer(d.answer);speak(d.answer);
+    if(d.graph){ // nota nova nasceu (remember)
+      bornStar(d);return;
+    }
+    if(d.nodes&&d.nodes.length>=4){lightCluster(d.nodes);}
+    else if(d.nodes&&d.nodes.length){const n=data.nodes.find(x=>x.id===d.nodes[0]);if(n)flyTo(n,true);}
+  }catch(e){setStatus('');showAnswer('O servidor não respondeu, senhora. Ele ainda está de pé?');}
+}
+function bornStar(d){
+  const nb=d.neighbor!=null?data.nodes.find(n=>n.id===d.neighbor):null;
+  data={nodes:d.graph.nodes.map(n=>{
+      const old=data.nodes.find(o=>o.label===n.label);
+      const base=old||nb||{};
+      return {...n,x:base.x,y:base.y,z:base.z};
+    }),links:d.graph.links.map(l=>({...l}))};
+  GRAPH.nodes=d.graph.nodes;GRAPH.links=d.graph.links;
+  Graph.graphData(data);
+  setTimeout(()=>{const n=data.nodes.find(x=>x.id===d.node.id);if(n)flyTo(n,true);},900);
+}
+
+// input + mic
+const q=document.getElementById('q');
+document.getElementById('send').onclick=()=>{ask(q.value);q.value='';};
+q.addEventListener('keydown',e=>{if(e.key==='Enter'){ask(q.value);q.value='';}});
+const micBtn=document.getElementById('mic');
+let rec=null;
+if('webkitSpeechRecognition' in window){
+  rec=new webkitSpeechRecognition();rec.lang='pt-BR';rec.interimResults=false;
+  rec.onresult=e=>{const t=e.results[0][0].transcript;q.value=t;setStatus('');ask(t);q.value='';};
+  rec.onend=()=>{micBtn.classList.remove('rec');if(!q.value)setStatus('');};
+  rec.onerror=()=>{setStatus('');micBtn.classList.remove('rec');showAnswer('O microfone se recusou a cooperar, senhora. Verifique a permissão no Chrome.');};
+  micBtn.onclick=()=>{speechSynthesis.cancel();micBtn.classList.add('rec');setStatus('● escutando…');rec.start();};
+}else{
+  micBtn.onclick=()=>showAnswer('Este navegador não tem reconhecimento de voz — use o Chrome, senhora.');
+}
+</script>
+</body>
+</html>

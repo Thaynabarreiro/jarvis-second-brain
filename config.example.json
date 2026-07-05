@@ -1,0 +1,5 @@
+{
+  "api_key": "PUT-YOUR-KEY-HERE",
+  "model": "claude-opus-4-8",
+  "notes_dir": ""
+}
