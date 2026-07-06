@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
+import webrtcvad
 
 APP_DIR = Path(__file__).resolve().parent
 JARVIS_HOME = Path.home() / ".jarvis"
@@ -240,13 +241,27 @@ def interrupt_speech():
 # ---------------------------------------------------------------- ears
 SR = 16000
 FRAME = 1280  # 80 ms, the step openwakeword expects
+VAD_STEP = 320  # 20 ms sub-chunk, a valid webrtcvad frame size at 16 kHz
+VAD = webrtcvad.Vad(3)  # 0 (lenient) - 3 (strict); 3 rejects the most background noise
+
+
+def _is_speech(mono_int16):
+    """Majority vote across 20 ms sub-chunks - real voice-activity detection
+    instead of a raw volume threshold, so background noise doesn't fool it
+    and quiet trailing syllables don't get clipped."""
+    votes = total = 0
+    for i in range(0, len(mono_int16) - VAD_STEP + 1, VAD_STEP):
+        total += 1
+        if VAD.is_speech(mono_int16[i:i + VAD_STEP].tobytes(), SR):
+            votes += 1
+    return total > 0 and votes * 2 > total
 
 
 def audio_loop():
     from openwakeword.model import Model
     oww = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
     from faster_whisper import WhisperModel
-    whisper = WhisperModel("base", device="cpu", compute_type="int8")
+    whisper = WhisperModel("small", device="cpu", compute_type="int8")
     print("(ears ready - say 'Hey Jarvis', clap twice, or click the orb)")
 
     clap_t = 0.0
@@ -285,20 +300,23 @@ def audio_loop():
                     handle_interaction(stream, whisper, oww)
 
 
-def record_until_silence(stream, max_s=14, silence_s=1.3):
+def record_until_silence(stream, max_s=14, silence_s=.7):
     chunks, quiet, started = [], 0, False
     for _ in range(int(max_s * SR / FRAME)):
         frame, _ = stream.read(FRAME)
         mono = frame[:, 0]
         chunks.append(mono)
-        loud = np.abs(mono).max() / 32768.0 > .02
-        if loud:
+        if _is_speech(mono):
             started, quiet = True, 0
         elif started:
             quiet += FRAME / SR
             if quiet >= silence_s:
                 break
-    return np.concatenate(chunks).astype(np.float32) / 32768.0
+    audio = np.concatenate(chunks).astype(np.float32) / 32768.0
+    peak = np.abs(audio).max()
+    if peak > 1e-4:  # normalize level - helps whisper on quiet/echoey mics
+        audio = audio / peak * .9
+    return audio
 
 
 def handle_interaction(stream, whisper, oww):
@@ -306,7 +324,7 @@ def handle_interaction(stream, whisper, oww):
     set_state("listening")
     audio = record_until_silence(stream)
     set_state("thinking")
-    segs, _info = whisper.transcribe(audio, language=CFG["language"], beam_size=1, vad_filter=True)
+    segs, _info = whisper.transcribe(audio, language=CFG["language"], beam_size=2, vad_filter=True)
     text = " ".join(s.text for s in segs).strip()
     if not text:
         set_state("idle")
