@@ -92,6 +92,30 @@ def tool_run_command(args):
         return f"(error: {e})"
 
 
+def tool_run_claude_code(args):
+    """Delegates real work to the Claude Code CLI in a specific project folder -
+    for actual coding/writing tasks, not simple one-liners (use run_command for those).
+    Runs on whatever plan 'claude' is logged into on this Mac (usually the user's
+    Claude subscription, separate from the Anthropic API key billing)."""
+    folder = os.path.expanduser(args["folder"])
+    if not os.path.isdir(folder):
+        return f"(folder not found: {folder})"
+    cmd = ["claude", "--print", "--model", args.get("model", "sonnet")]
+    if args.get("effort"):
+        cmd += ["--effort", args["effort"]]
+    cmd.append(args["prompt"])
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=folder)
+        out = (r.stdout + r.stderr).strip()
+        return out[:6000] or "(claude code ran, no output)"
+    except FileNotFoundError:
+        return "(error: 'claude' CLI not found - is Claude Code installed and on PATH?)"
+    except subprocess.TimeoutExpired:
+        return "(claude code timed out after 600s)"
+    except Exception as e:  # noqa: BLE001
+        return f"(error: {e})"
+
+
 def tool_screenshot(_args):
     import mss
     from PIL import Image
@@ -267,6 +291,14 @@ TOOL_DEFS = [
     {"name": "screenshot",
      "description": "Capture the screen NOW and return the image - use whenever asked what is on screen, in any application.",
      "input_schema": {"type": "object", "properties": {}}},
+    {"name": "run_claude_code",
+     "description": "Open the Claude Code CLI inside a specific project folder and give it a task/message - for real coding or writing work, not quick one-liners. Runs on the user's own Claude Code login on this Mac.",
+     "input_schema": {"type": "object", "properties": {
+         "folder": {"type": "string", "description": "Absolute path to the project folder (can use ~)"},
+         "prompt": {"type": "string", "description": "The instruction/message to give Claude Code"},
+         "model": {"type": "string", "description": "Model alias, e.g. 'sonnet', 'opus', 'fable' (default: sonnet)"},
+         "effort": {"type": "string", "description": "Optional effort level: low, medium, high, xhigh, max"}},
+         "required": ["folder", "prompt"]}},
     {"name": "search_notes",
      "description": "Search the user's markdown second-brain notes (Obsidian vault).",
      "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
@@ -287,6 +319,7 @@ TOOL_DEFS = [
          "days_ahead": {"type": "integer", "description": "How many days ahead to look, 1-14"}}}},
 ]
 TOOL_FNS = {"run_command": tool_run_command, "screenshot": tool_screenshot,
+            "run_claude_code": tool_run_claude_code,
             "search_notes": tool_search_notes, "remember": tool_remember,
             "read_calendar": tool_read_calendar,
             "read_google_calendar": tool_read_google_calendar,
@@ -302,7 +335,7 @@ def system_prompt():
     lang = {"pt": "Brazilian Portuguese", "en": "English", "es": "Spanish"}.get(CFG["language"], CFG["language"])
     return f"""You are Jarvis: an impeccably polite, dry-witted British butler. Speak {lang}. Address the user as "{CFG['user_title']}" occasionally (not every sentence). One genuinely funny line beats three bland ones.
 
-You run as a system assistant on {platform.system()} with real tools: shell, screen capture, notes search, the Mac Calendar, Google Calendar and Outlook Calendar, and long-term memory. Act: when asked to download, open, find or do something on the computer, DO it with run_command instead of explaining how. iCloud Drive files (including the Obsidian vault) are regular folders under the user's home directory - read them with run_command like any other file. If something fails, try an alternative path before giving up.
+You run as a system assistant on {platform.system()} with real tools: shell, screen capture, notes search, the Mac Calendar, Google Calendar, Outlook Calendar, delegating real coding/writing tasks to Claude Code in a project folder, and long-term memory. Act: when asked to download, open, find or do something on the computer, DO it with run_command instead of explaining how - create a missing folder first if needed rather than giving up. Use run_claude_code (not run_command) for substantial project work - writing plans, code, or documents inside a folder - since it gives Claude Code its own context window for that task. iCloud Drive files (including the Obsidian vault) are regular folders under the user's home directory - read them with run_command like any other file. If something fails, try an alternative path before giving up.
 
 Your answers are SPOKEN aloud: keep them short (1-3 sentences), no markdown, no lists, no long URLs. Important facts you learn about the user -> use remember.
 

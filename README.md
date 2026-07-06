@@ -20,6 +20,12 @@ Two versions live in this repo:
 - [pywebview](https://github.com/r0x0r/pywebview) — the floating orb overlay
 - **Anthropic API** — the agentic brain, with tools:
   - `run_command` — shell access: download files, open apps, manage files (destructive commands are blocked)
+  - `run_claude_code` — hands off real coding/writing work to the Claude Code CLI in a specific
+    project folder, with a chosen model and effort level (e.g. "open Claude Code in ~/interviews,
+    sonnet, low effort, and draft a study plan"). Runs on whatever Claude Code is logged into on
+    this Mac (usually your Claude subscription) - a separate cost/quota from the Anthropic API
+    key powering Jarvis's own replies. Note: whatever it writes back still gets read out/replied
+    to by Jarvis, which does cost a (usually small) amount of API tokens proportional to its length.
   - `screenshot` — native screen capture of whatever is on screen, any app, no sharing dialogs
   - `search_notes` — searches your markdown second brain (Obsidian vault, iCloud Drive, any markdown folder)
   - `remember` — long-term memory file that persists across sessions
