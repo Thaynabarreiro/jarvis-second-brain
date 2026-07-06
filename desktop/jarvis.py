@@ -44,6 +44,7 @@ DEFAULT_CONFIG = {
     "orb_y": None,
     "slack_bot_token": "",
     "slack_app_token": "",
+    "outlook_client_id": "",
 }
 
 if not CONFIG_PATH.exists():
@@ -208,6 +209,57 @@ def tool_read_google_calendar(args):
         return f"(google calendar error: {e})"
 
 
+OUTLOOK_CACHE_PATH = JARVIS_HOME / "outlook_token_cache.bin"
+OUTLOOK_SCOPES = ["Calendars.Read"]
+
+
+def _outlook_token():
+    import msal
+    client_id = CFG.get("outlook_client_id")
+    if not client_id:
+        return None, ("BLOCKED: Outlook Calendar isn't set up yet - add 'outlook_client_id' "
+                        "to config.json (see the README's Outlook Calendar setup section).")
+    cache = msal.SerializableTokenCache()
+    if OUTLOOK_CACHE_PATH.exists():
+        cache.deserialize(OUTLOOK_CACHE_PATH.read_text())
+    app = msal.PublicClientApplication(
+        client_id, authority="https://login.microsoftonline.com/common", token_cache=cache)
+    accounts = app.get_accounts()
+    result = app.acquire_token_silent(OUTLOOK_SCOPES, account=accounts[0]) if accounts else None
+    if cache.has_state_changed:
+        OUTLOOK_CACHE_PATH.write_text(cache.serialize())
+    if not result:
+        return None, ("BLOCKED: Outlook Calendar isn't connected yet. Run "
+                        "'python outlook_calendar_setup.py' once from the desktop/ folder.")
+    return result["access_token"], None
+
+
+def tool_read_outlook_calendar(args):
+    token, err = _outlook_token()
+    if err:
+        return err
+    try:
+        import requests
+        days = max(1, min(int(args.get("days_ahead", 1)), 14))
+        now = datetime.now()
+        start = now.replace(hour=0, minute=0, second=0).isoformat()
+        end = (now.replace(hour=0, minute=0, second=0) + timedelta(days=days)).isoformat()
+        r = requests.get(
+            "https://graph.microsoft.com/v1.0/me/calendarView",
+            headers={"Authorization": f"Bearer {token}", "Prefer": 'outlook.timezone="UTC"'},
+            params={"startDateTime": start, "endDateTime": end, "$orderby": "start/dateTime"},
+            timeout=15)
+        r.raise_for_status()
+        events = r.json().get("value", [])
+        if not events:
+            return "(nothing on the Outlook Calendar in that window)"
+        return "\n".join(
+            f"{e.get('subject', '(no title)')} -- {e.get('start', {}).get('dateTime', '')}"
+            for e in events)
+    except Exception as e:  # noqa: BLE001
+        return f"(outlook calendar error: {e})"
+
+
 TOOL_DEFS = [
     {"name": "run_command",
      "description": "Run a shell command on the computer (download files with curl, open apps, list/read/move files, etc.). Destructive commands are blocked.",
@@ -229,11 +281,16 @@ TOOL_DEFS = [
      "description": "Read events from the Mac Calendar app for the next N days (default 1 = today).",
      "input_schema": {"type": "object", "properties": {
          "days_ahead": {"type": "integer", "description": "How many days ahead to look, 1-14"}}}},
+    {"name": "read_outlook_calendar",
+     "description": "Read events from the user's Outlook/Microsoft 365 Calendar for the next N days (default 1 = today). Use alongside the other calendar tools if asked generally about 'my calendar/agenda'.",
+     "input_schema": {"type": "object", "properties": {
+         "days_ahead": {"type": "integer", "description": "How many days ahead to look, 1-14"}}}},
 ]
 TOOL_FNS = {"run_command": tool_run_command, "screenshot": tool_screenshot,
             "search_notes": tool_search_notes, "remember": tool_remember,
             "read_calendar": tool_read_calendar,
-            "read_google_calendar": tool_read_google_calendar}
+            "read_google_calendar": tool_read_google_calendar,
+            "read_outlook_calendar": tool_read_outlook_calendar}
 
 
 # ---------------------------------------------------------------- brain
@@ -245,7 +302,7 @@ def system_prompt():
     lang = {"pt": "Brazilian Portuguese", "en": "English", "es": "Spanish"}.get(CFG["language"], CFG["language"])
     return f"""You are Jarvis: an impeccably polite, dry-witted British butler. Speak {lang}. Address the user as "{CFG['user_title']}" occasionally (not every sentence). One genuinely funny line beats three bland ones.
 
-You run as a system assistant on {platform.system()} with real tools: shell, screen capture, notes search, both the Mac Calendar and Google Calendar, and long-term memory. Act: when asked to download, open, find or do something on the computer, DO it with run_command instead of explaining how. iCloud Drive files (including the Obsidian vault) are regular folders under the user's home directory - read them with run_command like any other file. If something fails, try an alternative path before giving up.
+You run as a system assistant on {platform.system()} with real tools: shell, screen capture, notes search, the Mac Calendar, Google Calendar and Outlook Calendar, and long-term memory. Act: when asked to download, open, find or do something on the computer, DO it with run_command instead of explaining how. iCloud Drive files (including the Obsidian vault) are regular folders under the user's home directory - read them with run_command like any other file. If something fails, try an alternative path before giving up.
 
 Your answers are SPOKEN aloud: keep them short (1-3 sentences), no markdown, no lists, no long URLs. Important facts you learn about the user -> use remember.
 

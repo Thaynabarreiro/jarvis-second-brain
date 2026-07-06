@@ -25,6 +25,7 @@ Two versions live in this repo:
   - `remember` — long-term memory file that persists across sessions
   - `read_calendar` — reads today's (or the next N days') events from the Mac Calendar app
   - `read_google_calendar` — same, from Google Calendar, once you link it (see below)
+  - `read_outlook_calendar` — same, from Outlook/Microsoft 365 Calendar, once you link it (see below)
 - Optional **Slack bridge** — DM or @mention Jarvis on Slack for the same brain, no voice needed
 
 Wake it three ways: say **"Hey Jarvis"**, **clap twice**, or **click the orb**.
@@ -94,7 +95,8 @@ To quit Jarvis, either:
   "orb_x": null,
   "orb_y": null,
   "slack_bot_token": "",
-  "slack_app_token": ""
+  "slack_app_token": "",
+  "outlook_client_id": ""
 }
 ```
 
@@ -140,6 +142,34 @@ Calendar (e.g. a work calendar not synced to Mac Calendar):
    Your browser opens, you log in and click Allow. Done — the token is cached and refreshes
    itself; you won't need to repeat this unless you revoke access.
 
+## 📆 Outlook Calendar setup (optional)
+
+To read a Microsoft 365 / Outlook.com calendar:
+
+1. Go to <https://portal.azure.com> → search **"App registrations"** → **New registration**.
+   - Name: "Jarvis" (or anything)
+   - Supported account types: **"Accounts in any organizational directory and personal Microsoft
+     accounts"** (needed for personal outlook.com/hotmail accounts too)
+   - Redirect URI: leave blank
+   - Click **Register**
+2. On the app's overview page, copy the **Application (client) ID**.
+3. **Authentication** (left sidebar) → scroll to **Advanced settings** →
+   **"Allow public client flows"** → set to **Yes** → **Save**.
+4. **API permissions** → **Add a permission** → **Microsoft Graph** → **Delegated permissions** →
+   search `Calendars.Read` → add it. (No admin approval needed for personal use.)
+5. Paste the client ID into `config.json`:
+   ```json
+   "outlook_client_id": "your-application-client-id"
+   ```
+6. Run once from a terminal, inside `desktop/`:
+   ```bash
+   ~/.jarvis/venv/bin/python outlook_calendar_setup.py       # Mac
+   %USERPROFILE%\.jarvis\venv\Scripts\python outlook_calendar_setup.py   # Windows
+   ```
+   It prints a short code and a link to **microsoft.com/devicelogin** — open that link on any
+   device, enter the code, sign in with your Microsoft account. Done — the token is cached and
+   refreshes itself.
+
 ## 💬 Slack setup (optional)
 
 Lets you DM or @mention Jarvis on Slack and get the same brain that answers your voice — a
@@ -163,6 +193,11 @@ Hermes agent for a different project). It won't touch or interfere with that.
    "slack_app_token": "xapp-…"
    ```
 7. Restart Jarvis. In Slack, DM the bot directly, or @mention it in any channel it's in.
+
+Slack messages go through the exact same brain as voice — including `run_command`, so you can
+ask it to edit, create, or update a note (Obsidian or any file) straight from Slack, e.g.
+"add a line to my pricing note about the new plan." It really writes to the file, not just talks
+about it.
 
 ---
 

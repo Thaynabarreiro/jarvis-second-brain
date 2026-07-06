@@ -14,3 +14,5 @@ google-auth
 google-auth-oauthlib
 google-api-python-client
 slack_bolt
+msal
+requests
