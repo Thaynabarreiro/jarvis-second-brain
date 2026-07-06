@@ -18,7 +18,7 @@ import re
 import subprocess
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +42,8 @@ DEFAULT_CONFIG = {
     "user_title": "senhora",
     "orb_x": None,
     "orb_y": None,
+    "slack_bot_token": "",
+    "slack_app_token": "",
 }
 
 if not CONFIG_PATH.exists():
@@ -165,6 +167,47 @@ def tool_read_calendar(args):
         return f"(error: {e})"
 
 
+GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+GOOGLE_CREDS_PATH = JARVIS_HOME / "google_credentials.json"
+GOOGLE_TOKEN_PATH = JARVIS_HOME / "google_token.json"
+
+
+def tool_read_google_calendar(args):
+    if not GOOGLE_TOKEN_PATH.exists():
+        return ("BLOCKED: Google Calendar isn't connected yet. Run "
+                 "'python google_calendar_setup.py' once from the desktop/ folder "
+                 "(see the README's Google Calendar setup section) to link it.")
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+
+        creds = Credentials.from_authorized_user_info(
+            json.loads(GOOGLE_TOKEN_PATH.read_text()), GOOGLE_SCOPES)
+        if not creds.valid and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            GOOGLE_TOKEN_PATH.write_text(creds.to_json())
+
+        days = max(1, min(int(args.get("days_ahead", 1)), 14))
+        now = datetime.now()
+        time_min = now.replace(hour=0, minute=0, second=0).isoformat() + "Z"
+        time_max = (now.replace(hour=0, minute=0, second=0) + timedelta(days=days)).isoformat() + "Z"
+
+        service = build("calendar", "v3", credentials=creds)
+        events = service.events().list(
+            calendarId="primary", timeMin=time_min, timeMax=time_max,
+            singleEvents=True, orderBy="startTime").execute().get("items", [])
+        if not events:
+            return "(nothing on the Google Calendar in that window)"
+        lines = []
+        for e in events:
+            start = e["start"].get("dateTime", e["start"].get("date"))
+            lines.append(f"{e.get('summary', '(no title)')} -- {start}")
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return f"(google calendar error: {e})"
+
+
 TOOL_DEFS = [
     {"name": "run_command",
      "description": "Run a shell command on the computer (download files with curl, open apps, list/read/move files, etc.). Destructive commands are blocked.",
@@ -175,6 +218,10 @@ TOOL_DEFS = [
     {"name": "search_notes",
      "description": "Search the user's markdown second-brain notes (Obsidian vault).",
      "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
+    {"name": "read_google_calendar",
+     "description": "Read events from the user's Google Calendar for the next N days (default 1 = today). Use this alongside read_calendar if asked generally about 'my calendar/agenda'.",
+     "input_schema": {"type": "object", "properties": {
+         "days_ahead": {"type": "integer", "description": "How many days ahead to look, 1-14"}}}},
     {"name": "remember",
      "description": "Store a fact in long-term memory (preferences, decisions, things to remember).",
      "input_schema": {"type": "object", "properties": {"fact": {"type": "string"}}, "required": ["fact"]}},
@@ -185,7 +232,8 @@ TOOL_DEFS = [
 ]
 TOOL_FNS = {"run_command": tool_run_command, "screenshot": tool_screenshot,
             "search_notes": tool_search_notes, "remember": tool_remember,
-            "read_calendar": tool_read_calendar}
+            "read_calendar": tool_read_calendar,
+            "read_google_calendar": tool_read_google_calendar}
 
 
 # ---------------------------------------------------------------- brain
@@ -197,7 +245,7 @@ def system_prompt():
     lang = {"pt": "Brazilian Portuguese", "en": "English", "es": "Spanish"}.get(CFG["language"], CFG["language"])
     return f"""You are Jarvis: an impeccably polite, dry-witted British butler. Speak {lang}. Address the user as "{CFG['user_title']}" occasionally (not every sentence). One genuinely funny line beats three bland ones.
 
-You run as a system assistant on {platform.system()} with real tools: shell, screen capture, notes search, calendar and long-term memory. Act: when asked to download, open, find or do something on the computer, DO it with run_command instead of explaining how. iCloud Drive files (including the Obsidian vault) are regular folders under the user's home directory - read them with run_command like any other file. If something fails, try an alternative path before giving up.
+You run as a system assistant on {platform.system()} with real tools: shell, screen capture, notes search, both the Mac Calendar and Google Calendar, and long-term memory. Act: when asked to download, open, find or do something on the computer, DO it with run_command instead of explaining how. iCloud Drive files (including the Obsidian vault) are regular folders under the user's home directory - read them with run_command like any other file. If something fails, try an alternative path before giving up.
 
 Your answers are SPOKEN aloud: keep them short (1-3 sentences), no markdown, no lists, no long URLs. Important facts you learn about the user -> use remember.
 
@@ -518,6 +566,11 @@ def main():
     PID_FILE.write_text(str(os.getpid()))
 
     threading.Thread(target=audio_loop, daemon=True).start()
+
+    if CFG.get("slack_bot_token") and CFG.get("slack_app_token"):
+        import slack_bridge
+        threading.Thread(
+            target=slack_bridge.start, args=(CFG, think, speak, STATE), daemon=True).start()
 
     global webview
     import webview

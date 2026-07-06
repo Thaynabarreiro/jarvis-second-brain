@@ -24,6 +24,8 @@ Two versions live in this repo:
   - `search_notes` — searches your markdown second brain (Obsidian vault, iCloud Drive, any markdown folder)
   - `remember` — long-term memory file that persists across sessions
   - `read_calendar` — reads today's (or the next N days') events from the Mac Calendar app
+  - `read_google_calendar` — same, from Google Calendar, once you link it (see below)
+- Optional **Slack bridge** — DM or @mention Jarvis on Slack for the same brain, no voice needed
 
 Wake it three ways: say **"Hey Jarvis"**, **clap twice**, or **click the orb**.
 Speak over it ("Hey Jarvis…") to interrupt mid-sentence. After he answers, he keeps listening
@@ -90,7 +92,9 @@ To quit Jarvis, either:
   "notes_dir": "/path/to/your/obsidian/vault",
   "user_title": "senhora",
   "orb_x": null,
-  "orb_y": null
+  "orb_y": null,
+  "slack_bot_token": "",
+  "slack_app_token": ""
 }
 ```
 
@@ -113,6 +117,52 @@ its new resting spot is remembered automatically, even after restarting Jarvis.
 - "Hey Jarvis — search my notes for the pricing strategy."
 - "Hey Jarvis — download the latest n8n release to my Downloads folder."
 - "Hey Jarvis — remember that my husband's laptop uses the English voice."
+- "Hey Jarvis — what's on my calendar today?"
+
+---
+
+## 📅 Google Calendar setup (optional)
+
+The Mac Calendar app already works out of the box (native, no setup). To also read a Google
+Calendar (e.g. a work calendar not synced to Mac Calendar):
+
+1. Go to <https://console.cloud.google.com>, create a project (or reuse one), then
+   **APIs & Services → Enable APIs → search "Google Calendar API" → Enable**.
+2. **APIs & Services → Credentials → Create Credentials → OAuth client ID**.
+   Application type: **Desktop app**. Download the JSON file it gives you.
+3. Save that file as `~/.jarvis/google_credentials.json` (Mac) or
+   `%USERPROFILE%\.jarvis\google_credentials.json` (Windows). Rename it exactly to that.
+4. Run once from a terminal, inside `desktop/`:
+   ```bash
+   ~/.jarvis/venv/bin/python google_calendar_setup.py       # Mac
+   %USERPROFILE%\.jarvis\venv\Scripts\python google_calendar_setup.py   # Windows
+   ```
+   Your browser opens, you log in and click Allow. Done — the token is cached and refreshes
+   itself; you won't need to repeat this unless you revoke access.
+
+## 💬 Slack setup (optional)
+
+Lets you DM or @mention Jarvis on Slack and get the same brain that answers your voice — a
+**separate, dedicated Slack app**, independent from any other bot you already run (e.g. a
+Hermes agent for a different project). It won't touch or interfere with that.
+
+1. Go to <https://api.slack.com/apps> → **Create New App → From scratch**. Name it (e.g. "Jarvis"),
+   pick your workspace.
+2. **Socket Mode** (left sidebar) → toggle it **On** → it'll ask you to generate an
+   app-level token: name it anything, scope `connections:write` → copy the token
+   (starts with `xapp-`) → this is `slack_app_token`.
+3. **OAuth & Permissions** → scroll to **Scopes → Bot Token Scopes** → add:
+   `chat:write`, `im:history`, `im:read`, `im:write`, `app_mentions:read`.
+4. **Event Subscriptions** → toggle **On** → under **Subscribe to bot events** add:
+   `message.im` and `app_mention`.
+5. Back in **OAuth & Permissions**, click **Install to Workspace** → copy the
+   **Bot User OAuth Token** (starts with `xoxb-`) → this is `slack_bot_token`.
+6. Paste both into `config.json`:
+   ```json
+   "slack_bot_token": "xoxb-…",
+   "slack_app_token": "xapp-…"
+   ```
+7. Restart Jarvis. In Slack, DM the bot directly, or @mention it in any channel it's in.
 
 ---
 
