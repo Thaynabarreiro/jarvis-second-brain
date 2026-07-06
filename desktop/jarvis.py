@@ -257,7 +257,12 @@ def _is_speech(mono_int16):
     return total > 0 and votes * 2 > total
 
 
+FOLLOWUP_WINDOW = 6.0  # seconds after Jarvis finishes speaking where he keeps listening
+followup_until = 0.0
+
+
 def audio_loop():
+    global followup_until
     from openwakeword.model import Model
     oww = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
     from faster_whisper import WhisperModel
@@ -279,12 +284,17 @@ def audio_loop():
             except queue.Empty:
                 pass
 
-            # claps: two sharp peaks 0.12-0.7 s apart
+            # follow-up: right after Jarvis answers, no wake word needed for a quick reply
+            if STATE["mode"] == "idle" and time.time() < followup_until and _is_speech(mono):
+                handle_interaction(stream, whisper, oww, lead=mono)
+                continue
+
+            # claps: two sharp peaks 0.12-0.8 s apart
             peak = np.abs(mono).max() / 32768.0
             level = level * .97 + peak * .03
-            if peak > max(.5, level * 4) and STATE["mode"] == "idle":
+            if peak > max(.35, level * 4) and STATE["mode"] == "idle":
                 now = time.time()
-                if .12 < now - clap_t < .7:
+                if .1 < now - clap_t < .8:
                     clap_t = 0
                     handle_interaction(stream, whisper, oww)
                     continue
@@ -292,7 +302,7 @@ def audio_loop():
 
             # wake word
             score = oww.predict(mono)["hey_jarvis"]
-            if score > .55:
+            if score > .4:
                 oww.reset()
                 if STATE["mode"] == "speaking":
                     interrupt_speech()  # barge-in: talk over Jarvis to stop him
@@ -300,8 +310,9 @@ def audio_loop():
                     handle_interaction(stream, whisper, oww)
 
 
-def record_until_silence(stream, max_s=14, silence_s=.7):
-    chunks, quiet, started = [], 0, False
+def record_until_silence(stream, max_s=14, silence_s=.7, lead=None):
+    chunks = [lead] if lead is not None else []
+    quiet, started = 0, lead is not None
     for _ in range(int(max_s * SR / FRAME)):
         frame, _ = stream.read(FRAME)
         mono = frame[:, 0]
@@ -319,10 +330,23 @@ def record_until_silence(stream, max_s=14, silence_s=.7):
     return audio
 
 
-def handle_interaction(stream, whisper, oww):
-    _ding()
+def handle_interaction(stream, whisper, oww, lead=None):
+    """Records the utterance on the main audio thread (it owns the mic
+    stream), then hands transcription + thinking + speaking off to a worker
+    thread so wake-word/clap detection keeps running in real time instead of
+    freezing for the several seconds an LLM round trip takes."""
+    global followup_until
+    followup_until = 0.0
+    if lead is None:
+        _ding()
     set_state("listening")
-    audio = record_until_silence(stream)
+    audio = record_until_silence(stream, lead=lead)
+    oww.reset()
+    threading.Thread(target=process_utterance, args=(whisper, audio), daemon=True).start()
+
+
+def process_utterance(whisper, audio):
+    global followup_until
     set_state("thinking")
     segs, _info = whisper.transcribe(audio, language=CFG["language"], beam_size=2, vad_filter=True)
     text = " ".join(s.text for s in segs).strip()
@@ -335,8 +359,8 @@ def handle_interaction(stream, whisper, oww):
     except Exception as e:  # noqa: BLE001
         answer = f"Brain hiccup, {CFG['user_title']}: {e}"
     print(f"🎩 {answer}")
-    threading.Thread(target=speak, args=(answer,), daemon=True).start()
-    oww.reset()
+    speak(answer)
+    followup_until = time.time() + FOLLOWUP_WINDOW
 
 
 def _ding():
