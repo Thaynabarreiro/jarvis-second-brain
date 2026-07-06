@@ -6,39 +6,104 @@
 <body>
 <canvas id="orb" width="340" height="340" style="width:170px;height:170px"></canvas>
 <script>
+// Arc-reactor style assistant orb: glowing core, counter-rotating particle
+// shells, tilted orbital rings. States: idle | listening | thinking | speaking.
 const octx=document.getElementById('orb').getContext('2d');
-let state='idle',amp=0,ampTarget=0;
-const PTS=[];
-for(let i=0;i<420;i++){const y=1-(i/419)*2,r=Math.sqrt(1-y*y),th=i*2.399963;
-  PTS.push({x:Math.cos(th)*r,y,z:Math.sin(th)*r});}
-let rotY=0,rotX=0;
+let state='idle',amp=0,ampTarget=0,glow=0;
+const HUES={idle:205,listening:340,thinking:268,speaking:192};
+let hue=205,hueTarget=205;
+
+// two particle shells (fibonacci spheres), counter-rotating
+function shell(n){const a=[];for(let i=0;i<n;i++){
+  const y=1-(i/(n-1))*2,r=Math.sqrt(1-y*y),th=i*2.399963;
+  a.push({x:Math.cos(th)*r,y,z:Math.sin(th)*r});}return a;}
+const OUTER=shell(300),INNER=shell(140);
+let rotA=0,rotB=0,tilt=0;
+
+function project(p,rot,tx){
+  const cy=Math.cos(rot),sy=Math.sin(rot),cx=Math.cos(tx),sx=Math.sin(tx);
+  let x=p.x*cy+p.z*sy,z=-p.x*sy+p.z*cy,y=p.y*cx-z*sx;z=p.y*sx+z*cx;
+  return {x,y,z};
+}
+
+function ring(C,R,tiltX,rot,alpha,width){
+  octx.save();octx.translate(C,C);octx.rotate(rot);octx.scale(1,Math.abs(Math.sin(tiltX))*.92+.08);
+  octx.beginPath();octx.arc(0,0,R,0,7);
+  octx.strokeStyle=`hsla(${hue},90%,70%,${alpha})`;octx.lineWidth=width;octx.stroke();
+  octx.restore();
+}
+
 function frame(t){
-  if(state==='speaking')ampTarget=.35+.65*Math.abs(Math.sin(t/90)+Math.sin(t/37)*.5)/1.5;
-  else if(state==='listening')ampTarget=.3+.4*Math.abs(Math.sin(t/140));
-  else if(state==='thinking')ampTarget=.25+.15*Math.sin(t/300);
-  else ampTarget=.08;
-  amp+=(ampTarget-amp)*.12;rotY+=.004+amp*.02;rotX=Math.sin(t/4000)*.35;
-  const W=340,C=W/2,base=58+amp*30;
+  // state-driven amplitude
+  if(state==='speaking')ampTarget=.35+.65*Math.abs(Math.sin(t/85)+Math.sin(t/39)*.6+Math.sin(t/151)*.3)/1.9;
+  else if(state==='listening')ampTarget=.32+.38*Math.abs(Math.sin(t/150));
+  else if(state==='thinking')ampTarget=.28+.14*Math.sin(t/260);
+  else ampTarget=.09;
+  amp+=(ampTarget-amp)*.13;
+  hueTarget=HUES[state]??205;hue+=(hueTarget-hue)*.08;
+  glow=.5+amp*.9;
+  rotA+=.0035+amp*.017;rotB-=.006+amp*.024;tilt=Math.sin(t/5200)*.4;
+
+  const W=340,C=W/2,R=62+amp*26;
   octx.clearRect(0,0,W,W);
-  const hue=state==='listening'?350:state==='thinking'?270:205;
-  const g=octx.createRadialGradient(C,C,base*.3,C,C,base*1.9);
-  g.addColorStop(0,`hsla(${hue},90%,65%,${.28+amp*.3})`);g.addColorStop(1,'transparent');
+
+  // outer atmosphere
+  let g=octx.createRadialGradient(C,C,R*.2,C,C,R*2.1);
+  g.addColorStop(0,`hsla(${hue},95%,62%,${.20+amp*.25})`);
+  g.addColorStop(.55,`hsla(${hue},90%,55%,${.07+amp*.10})`);
+  g.addColorStop(1,'transparent');
   octx.fillStyle=g;octx.fillRect(0,0,W,W);
-  const cy=Math.cos(rotY),sy=Math.sin(rotY),cx=Math.cos(rotX),sx=Math.sin(rotX);
-  for(const p of PTS){
-    let x=p.x*cy+p.z*sy,z=-p.x*sy+p.z*cy,y=p.y*cx-z*sx;z=p.y*sx+z*cx;
-    const wob=1+amp*.35*Math.sin(t/120+p.y*6+p.x*4);
-    const R=base*wob,px=C+x*R,py=C+y*R,d=(z+1)/2;
-    octx.fillStyle=`hsla(${hue},85%,${55+d*35}%,${.15+d*.75})`;
-    octx.beginPath();octx.arc(px,py,.7+d*2+amp*1.4,0,7);octx.fill();
+
+  // orbital rings (Saturn-like, tilted, slow precession)
+  ring(C,R*1.38,tilt+.9,rotA*.5,.10+amp*.20,1.1);
+  ring(C,R*1.52,tilt+1.15,-rotA*.35+1.1,.06+amp*.14,.8);
+
+  // back hemisphere of outer shell (drawn dim, behind the core)
+  const pts=[];
+  for(const p of OUTER){const q=project(p,rotA,tilt);q.s=1;pts.push(q);}
+  for(const p of INNER){const q=project(p,rotB,-tilt*.6);q.s=2;pts.push(q);}
+  pts.sort((a,b)=>a.z-b.z);
+  const breathe=1+amp*.32;
+  for(const q of pts){
+    if(q.z<0&&pts.core!==true){/* behind */}
+    const rr=(q.s===1?R:R*.55)*breathe*(1+(q.s===2?amp*.25*Math.sin(t/110+q.y*7):amp*.18*Math.sin(t/130+q.x*5)));
+    const px=C+q.x*rr,py=C+q.y*rr,d=(q.z+1)/2;
+    const size=(q.s===1?.5+d*1.9:1+d*2.4)+amp*1.3;
+    const light=q.s===1?50+d*40:65+d*30;
+    octx.fillStyle=`hsla(${hue},${85+d*10}%,${light}%,${(q.s===1?.10:.20)+d*.72})`;
+    octx.beginPath();octx.arc(px,py,size,0,7);octx.fill();
+    // draw the core exactly at depth 0 (between back and front points)
+    if(!pts.core&&q.z>=0){pts.core=true;drawCore(C,R,t);}
   }
+  if(!pts.core)drawCore(C,R,t);
+
   requestAnimationFrame(frame);
 }
+
+function drawCore(C,R,t){
+  const r=R*.34*(1+amp*.28);
+  // core glow
+  let g=octx.createRadialGradient(C,C,0,C,C,r*2.4);
+  g.addColorStop(0,`hsla(${hue},100%,92%,${.85*glow})`);
+  g.addColorStop(.35,`hsla(${hue},100%,70%,${.45*glow})`);
+  g.addColorStop(1,'transparent');
+  octx.fillStyle=g;octx.beginPath();octx.arc(C,C,r*2.4,0,7);octx.fill();
+  // core body
+  g=octx.createRadialGradient(C-r*.3,C-r*.35,r*.1,C,C,r);
+  g.addColorStop(0,`hsla(${hue},100%,97%,.95)`);
+  g.addColorStop(.6,`hsla(${hue},95%,72%,.9)`);
+  g.addColorStop(1,`hsla(${hue},90%,48%,.75)`);
+  octx.fillStyle=g;octx.beginPath();octx.arc(C,C,r,0,7);octx.fill();
+  // thin bright rim
+  octx.strokeStyle=`hsla(${hue},100%,85%,${.5+amp*.4})`;octx.lineWidth=1.2;
+  octx.beginPath();octx.arc(C,C,r*1.12+Math.sin(t/300)*1.5,0,7);octx.stroke();
+}
+
 requestAnimationFrame(frame);
-setInterval(async()=>{ // sincroniza com o daemon
+setInterval(async()=>{ // sync with the daemon
   try{const s=await window.pywebview.api.get_state();state=s.mode;}catch(e){}
 },250);
-document.getElementById('orb').addEventListener('click',()=>{ // clique = acordar / interromper
+document.getElementById('orb').addEventListener('click',()=>{ // click = wake / interrupt
   try{window.pywebview.api.wake();}catch(e){}
 });
 </script>
