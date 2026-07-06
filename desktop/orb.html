@@ -103,8 +103,25 @@ requestAnimationFrame(frame);
 setInterval(async()=>{ // sync with the daemon
   try{const s=await window.pywebview.api.get_state();state=s.mode;}catch(e){}
 },250);
-document.getElementById('orb').addEventListener('click',()=>{ // click = wake / interrupt
+const canvas=document.getElementById('orb');
+canvas.addEventListener('click',()=>{ // click = wake / interrupt
+  if(quitting)return;
   try{window.pywebview.api.wake();}catch(e){}
 });
+
+// hold ~1s without moving the mouse = quit
+let downAt=0,downPos=null,quitTimer=null,quitting=false;
+canvas.addEventListener('pointerdown',e=>{
+  downAt=performance.now();downPos={x:e.clientX,y:e.clientY};quitting=false;
+  quitTimer=setTimeout(()=>{
+    quitting=true;document.body.style.filter='brightness(.25) saturate(.3)';
+    setTimeout(()=>{try{window.pywebview.api.quit();}catch(e){}},250);
+  },1000);
+});
+canvas.addEventListener('pointermove',e=>{
+  if(downPos&&(Math.abs(e.clientX-downPos.x)>6||Math.abs(e.clientY-downPos.y)>6))clearTimeout(quitTimer);
+});
+canvas.addEventListener('pointerup',()=>clearTimeout(quitTimer));
+canvas.addEventListener('pointerleave',()=>clearTimeout(quitTimer));
 </script>
 </body></html>

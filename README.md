@@ -63,6 +63,16 @@ permissions — allow both (System Settings → Privacy & Security).
 4. Put your API key in `C:\Users\YOU\.jarvis\config.json`.
 5. Double-click `desktop\start-jarvis-desktop.bat`. Allow microphone access if asked.
 
+## Starting and stopping Jarvis
+
+Double-clicking the start file opens a Terminal/Command Prompt window that runs Jarvis in the
+background - closing that window does **not** stop it, and double-clicking start again will
+refuse to launch a second copy (it detects the one already running instead of duplicating it).
+
+To quit Jarvis, either:
+- **Hold the orb down for about a second** - it dims and closes, no window-hunting needed, or
+- Double-click **`Stop-Jarvis.command`** (Mac) / **`stop-jarvis.bat`** (Windows) in `desktop/`.
+
 ## ⚙️ config.json reference
 
 ```json

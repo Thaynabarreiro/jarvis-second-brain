@@ -348,6 +348,30 @@ def _ding():
         pass
 
 
+# ---------------------------------------------------------------- lifecycle
+PID_FILE = JARVIS_HOME / "jarvis.pid"
+
+
+def pid_alive(pid):
+    try:
+        if platform.system() == "Windows":
+            r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"],
+                               capture_output=True, text=True, timeout=5)
+            return str(pid) in r.stdout
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+
+def quit_jarvis():
+    try:
+        PID_FILE.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001
+        pass
+    os._exit(0)
+
+
 # ---------------------------------------------------------------- orb
 ORB_HTML = (APP_DIR / "orb.html").read_text(encoding="utf-8")
 ORB_SIZE = 170
@@ -364,6 +388,9 @@ class OrbApi:
         elif STATE["mode"] == "idle":
             WAKE_QUEUE.put(1)
         return "ok"
+
+    def quit(self):
+        quit_jarvis()
 
 
 def _default_home(win):
@@ -413,6 +440,18 @@ def main():
     if API_KEY.startswith("PUT-YOUR"):
         print(f"! Set your API key in {CONFIG_PATH} (api_key field) or export ANTHROPIC_API_KEY.")
         return
+
+    if PID_FILE.exists():
+        try:
+            old_pid = int(PID_FILE.read_text().strip())
+        except ValueError:
+            old_pid = None
+        if old_pid and pid_alive(old_pid):
+            print(f"Jarvis is already running (pid {old_pid}).")
+            print("Double-click Stop-Jarvis to quit it, or hold the orb for ~1s.")
+            return
+    PID_FILE.write_text(str(os.getpid()))
+
     threading.Thread(target=audio_loop, daemon=True).start()
 
     global webview
@@ -422,7 +461,10 @@ def main():
         width=ORB_SIZE, height=ORB_SIZE, x=None, y=None,
         frameless=True, on_top=True, transparent=True, resizable=False,
         easy_drag=True)
-    webview.start(orb_position_loop, win)  # blocks until the orb window closes
+    try:
+        webview.start(orb_position_loop, win)  # blocks until the orb window closes
+    finally:
+        PID_FILE.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
