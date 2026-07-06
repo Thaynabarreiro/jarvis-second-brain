@@ -129,6 +129,42 @@ def tool_remember(args):
     return "remembered"
 
 
+CALENDAR_SCRIPT = """
+on run {daysAhead}
+    set startD to current date
+    set time of startD to 0
+    set endD to startD + ((daysAhead as integer) * days)
+    set out to ""
+    tell application "Calendar"
+        repeat with cal in calendars
+            set evts to (every event of cal whose start date >= startD and start date < endD)
+            repeat with e in evts
+                set out to out & (summary of e) & " -- " & (start date of e as string) & linefeed
+            end repeat
+        end repeat
+    end tell
+    return out
+end run
+"""
+
+
+def tool_read_calendar(args):
+    days = max(1, min(int(args.get("days_ahead", 1)), 14))
+    try:
+        subprocess.run(["open", "-a", "Calendar"], capture_output=True, timeout=5)
+        r = subprocess.run(["osascript", "-e", CALENDAR_SCRIPT, str(days)],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            if "-1743" in r.stderr or "not allowed" in r.stderr.lower():
+                return ("BLOCKED: macOS is asking for Calendar access. Open System Settings > "
+                         "Privacy & Security > Automation, and allow this app to control Calendar, "
+                         "then ask me again.")
+            return f"(calendar error: {r.stderr.strip()[:300]})"
+        return r.stdout.strip() or "(nothing on the calendar in that window)"
+    except Exception as e:  # noqa: BLE001
+        return f"(error: {e})"
+
+
 TOOL_DEFS = [
     {"name": "run_command",
      "description": "Run a shell command on the computer (download files with curl, open apps, list/read/move files, etc.). Destructive commands are blocked.",
@@ -142,9 +178,14 @@ TOOL_DEFS = [
     {"name": "remember",
      "description": "Store a fact in long-term memory (preferences, decisions, things to remember).",
      "input_schema": {"type": "object", "properties": {"fact": {"type": "string"}}, "required": ["fact"]}},
+    {"name": "read_calendar",
+     "description": "Read events from the Mac Calendar app for the next N days (default 1 = today).",
+     "input_schema": {"type": "object", "properties": {
+         "days_ahead": {"type": "integer", "description": "How many days ahead to look, 1-14"}}}},
 ]
 TOOL_FNS = {"run_command": tool_run_command, "screenshot": tool_screenshot,
-            "search_notes": tool_search_notes, "remember": tool_remember}
+            "search_notes": tool_search_notes, "remember": tool_remember,
+            "read_calendar": tool_read_calendar}
 
 
 # ---------------------------------------------------------------- brain
@@ -156,7 +197,7 @@ def system_prompt():
     lang = {"pt": "Brazilian Portuguese", "en": "English", "es": "Spanish"}.get(CFG["language"], CFG["language"])
     return f"""You are Jarvis: an impeccably polite, dry-witted British butler. Speak {lang}. Address the user as "{CFG['user_title']}" occasionally (not every sentence). One genuinely funny line beats three bland ones.
 
-You run as a system assistant on {platform.system()} with real tools: shell, screen capture, notes search and long-term memory. Act: when asked to download, open, find or do something on the computer, DO it with run_command instead of explaining how. If something fails, try an alternative path before giving up.
+You run as a system assistant on {platform.system()} with real tools: shell, screen capture, notes search, calendar and long-term memory. Act: when asked to download, open, find or do something on the computer, DO it with run_command instead of explaining how. iCloud Drive files (including the Obsidian vault) are regular folders under the user's home directory - read them with run_command like any other file. If something fails, try an alternative path before giving up.
 
 Your answers are SPOKEN aloud: keep them short (1-3 sentences), no markdown, no lists, no long URLs. Important facts you learn about the user -> use remember.
 

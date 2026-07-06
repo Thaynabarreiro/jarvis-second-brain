@@ -21,11 +21,17 @@ Two versions live in this repo:
 - **Anthropic API** — the agentic brain, with tools:
   - `run_command` — shell access: download files, open apps, manage files (destructive commands are blocked)
   - `screenshot` — native screen capture of whatever is on screen, any app, no sharing dialogs
-  - `search_notes` — searches your markdown second brain (Obsidian vault etc.)
+  - `search_notes` — searches your markdown second brain (Obsidian vault, iCloud Drive, any markdown folder)
   - `remember` — long-term memory file that persists across sessions
+  - `read_calendar` — reads today's (or the next N days') events from the Mac Calendar app
 
 Wake it three ways: say **"Hey Jarvis"**, **clap twice**, or **click the orb**.
-Speak over it ("Hey Jarvis…") to interrupt mid-sentence.
+Speak over it ("Hey Jarvis…") to interrupt mid-sentence. After he answers, he keeps listening
+for **6 seconds** without needing the wake word again, for a natural back-and-forth.
+
+The first time you ask about your calendar, **macOS will show a permission popup** ("Terminal"
+or "Python" wants to control Calendar) — click Allow. If you miss it or say no, Jarvis will tell
+you exactly where to fix it (System Settings → Privacy & Security → Automation).
 
 ---
 
