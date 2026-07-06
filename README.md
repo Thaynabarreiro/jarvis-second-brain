@@ -68,18 +68,28 @@ permissions — allow both (System Settings → Privacy & Security).
 ```json
 {
   "api_key": "sk-ant-…",
-  "model": "claude-opus-4-8",
+  "model": "claude-sonnet-5",
   "voice": "pt-BR-AntonioNeural",
   "language": "pt",
   "notes_dir": "/path/to/your/obsidian/vault",
-  "user_title": "senhora"
+  "user_title": "senhora",
+  "orb_x": null,
+  "orb_y": null
 }
 ```
 
+- `model`: `claude-sonnet-5` is the default for a snappy voice assistant. Switch to `claude-opus-4-8` for a smarter but slower brain.
 - `voice`: any edge-tts voice (`edge-tts --list-voices`), e.g. `en-GB-RyanNeural` for English
 - `language`: speech-recognition language (`pt`, `en`, …)
 - `notes_dir`: your markdown notes folder; leave `""` to disable notes search
 - `user_title`: how the butler addresses you (`sir`, `senhora`, …)
+- `orb_x` / `orb_y`: remembers where you last dragged the orb to rest; leave `null` for bottom-right
+
+### The orb's behavior
+
+It rests in the bottom-right corner (or wherever you last dragged it) when idle, and glides to the
+center of the screen while listening, thinking, or speaking. **Drag it anywhere** with the mouse —
+its new resting spot is remembered automatically, even after restarting Jarvis.
 
 ## Try saying
 

@@ -34,17 +34,29 @@ HOME = str(Path.home())
 
 DEFAULT_CONFIG = {
     "api_key": "PUT-YOUR-KEY-HERE",
-    "model": "claude-opus-4-8",
+    "model": "claude-sonnet-5",
     "voice": "pt-BR-AntonioNeural",
     "language": "pt",
     "notes_dir": "",
     "user_title": "senhora",
+    "orb_x": None,
+    "orb_y": None,
 }
 
 if not CONFIG_PATH.exists():
     CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2, ensure_ascii=False))
 CFG = {**DEFAULT_CONFIG, **json.loads(CONFIG_PATH.read_text())}
 API_KEY = os.environ.get("ANTHROPIC_API_KEY") or CFG["api_key"]
+
+
+def save_orb_position(x, y):
+    CFG["orb_x"], CFG["orb_y"] = x, y
+    try:
+        on_disk = json.loads(CONFIG_PATH.read_text())
+        on_disk["orb_x"], on_disk["orb_y"] = x, y
+        CONFIG_PATH.write_text(json.dumps(on_disk, indent=2, ensure_ascii=False))
+    except Exception:  # noqa: BLE001
+        pass
 
 STATE = {"mode": "idle", "text": ""}  # idle|listening|thinking|speaking
 WAKE_QUEUE = queue.Queue()
@@ -160,7 +172,7 @@ def think(user_text):
     local = list(HISTORY)
     for _ in range(10):
         resp = client.messages.create(
-            model=CFG["model"], max_tokens=900, system=system_prompt(),
+            model=CFG["model"], max_tokens=500, system=system_prompt(),
             tools=TOOL_DEFS, messages=local)
         if resp.stop_reason != "tool_use":
             text = "".join(b.text for b in resp.content if b.type == "text").strip()
@@ -185,6 +197,21 @@ def think(user_text):
 _play_lock = threading.Lock()
 
 
+def _decode_audio(mp3_path):
+    """Decode via ffmpeg when available - far more robust than libsndfile's
+    mp3 support, which produces static/crackle on some clips. Falls back to
+    soundfile if ffmpeg isn't installed."""
+    wav_path = mp3_path.with_suffix(".wav")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(mp3_path),
+             "-ar", "48000", "-ac", "1", str(wav_path)],
+            check=True, timeout=15, capture_output=True)
+        return sf.read(str(wav_path), dtype="float32")
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return sf.read(str(mp3_path), dtype="float32")
+
+
 def speak(text):
     import asyncio
     import edge_tts
@@ -195,10 +222,10 @@ def speak(text):
         await edge_tts.Communicate(clean, CFG["voice"], rate="+8%").save(str(path))
     try:
         asyncio.run(gen())
-        data, sr = sf.read(str(path), dtype="float32")
+        data, sr = _decode_audio(path)
         set_state("speaking", text)
         with _play_lock:
-            sd.play(data, sr)
+            sd.play(data, sr, latency="high")
         sd.wait()
     except Exception as e:  # noqa: BLE001
         print("TTS failed:", e)
@@ -219,12 +246,12 @@ def audio_loop():
     from openwakeword.model import Model
     oww = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
     from faster_whisper import WhisperModel
-    whisper = WhisperModel("small", device="cpu", compute_type="int8")
+    whisper = WhisperModel("base", device="cpu", compute_type="int8")
     print("(ears ready - say 'Hey Jarvis', clap twice, or click the orb)")
 
     clap_t = 0.0
     level = 0.0
-    with sd.InputStream(samplerate=SR, channels=1, dtype="int16", blocksize=FRAME) as stream:
+    with sd.InputStream(samplerate=SR, channels=1, dtype="int16", blocksize=FRAME, latency="high") as stream:
         while True:
             frame, _ = stream.read(FRAME)
             mono = frame[:, 0]
@@ -279,7 +306,7 @@ def handle_interaction(stream, whisper, oww):
     set_state("listening")
     audio = record_until_silence(stream)
     set_state("thinking")
-    segs, _info = whisper.transcribe(audio, language=CFG["language"], beam_size=2)
+    segs, _info = whisper.transcribe(audio, language=CFG["language"], beam_size=1, vad_filter=True)
     text = " ".join(s.text for s in segs).strip()
     if not text:
         set_state("idle")
@@ -305,6 +332,8 @@ def _ding():
 
 # ---------------------------------------------------------------- orb
 ORB_HTML = (APP_DIR / "orb.html").read_text(encoding="utf-8")
+ORB_SIZE = 170
+MARGIN = 24
 
 
 class OrbApi:
@@ -319,19 +348,63 @@ class OrbApi:
         return "ok"
 
 
+def _default_home(win):
+    screen = webview.screens[0] if webview.screens else None
+    sw, sh = (screen.width, screen.height) if screen else (1440, 900)
+    return sw - ORB_SIZE - MARGIN, sh - ORB_SIZE - MARGIN
+
+
+def orb_position_loop(win):
+    """Rests bottom-right (or wherever the user last dragged it to), glides
+    to screen-center while active, and detects manual drags to remember the
+    new resting spot."""
+    home = (CFG["orb_x"], CFG["orb_y"])
+    if home[0] is None:
+        home = _default_home(win)
+    win.move(*home)
+    last_known, moving_until, last_mode = home, 0.0, "idle"
+
+    while True:
+        time.sleep(.3)
+        mode = STATE["mode"]
+        now = time.time()
+
+        if mode != "idle" and last_mode == "idle":
+            screen = webview.screens[0] if webview.screens else None
+            sw, sh = (screen.width, screen.height) if screen else (1440, 900)
+            target = (sw // 2 - ORB_SIZE // 2, sh // 2 - ORB_SIZE // 2)
+            win.move(*target)
+            last_known, moving_until = target, now + .6
+        elif mode == "idle" and last_mode != "idle":
+            win.move(*home)
+            last_known, moving_until = home, now + .6
+
+        elif mode == "idle" and now > moving_until:
+            try:
+                cur = (win.x, win.y)
+            except Exception:  # noqa: BLE001
+                cur = last_known
+            if cur != last_known:  # user dragged it - this is the new home
+                home = cur
+                save_orb_position(*home)
+                last_known = cur
+        last_mode = mode
+
+
 def main():
     if API_KEY.startswith("PUT-YOUR"):
         print(f"! Set your API key in {CONFIG_PATH} (api_key field) or export ANTHROPIC_API_KEY.")
         return
     threading.Thread(target=audio_loop, daemon=True).start()
 
+    global webview
     import webview
     win = webview.create_window(
         "Jarvis", html=ORB_HTML, js_api=OrbApi(),
-        width=170, height=170, x=None, y=None,
+        width=ORB_SIZE, height=ORB_SIZE, x=None, y=None,
         frameless=True, on_top=True, transparent=True, resizable=False,
         easy_drag=True)
-    webview.start()  # blocks until the orb window closes
+    webview.start(orb_position_loop, win)  # blocks until the orb window closes
 
 
 if __name__ == "__main__":
