@@ -892,16 +892,24 @@ def orb_position_loop(win):
 
         if HOME_MODE["active"]:
             if not home_screen_open:
-                win.load_html(HOME_HTML)
-                win.toggle_fullscreen()
+                try:
+                    screen = webview.screens[0] if webview.screens else None
+                    sw, sh = (screen.width, screen.height) if screen else (1440, 900)
+                    win.load_html(HOME_HTML)
+                    win.resize(sw, sh)
+                    win.move(0, 0)
+                except Exception as e:  # noqa: BLE001
+                    print("home screen open failed:", e)
                 home_screen_open = True
             last_mode = STATE["mode"]
             continue
         elif home_screen_open:
-            win.toggle_fullscreen()
-            win.load_html(ORB_HTML)
-            win.resize(ORB_SIZE, ORB_SIZE)
-            win.move(*home)
+            try:
+                win.load_html(ORB_HTML)
+                win.resize(ORB_SIZE, ORB_SIZE)
+                win.move(*home)
+            except Exception as e:  # noqa: BLE001
+                print("home screen close failed:", e)
             last_known, moving_until = home, time.time() + .6
             home_screen_open = False
             last_mode = "idle"
