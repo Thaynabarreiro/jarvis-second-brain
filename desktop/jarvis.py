@@ -51,6 +51,8 @@ DEFAULT_CONFIG = {
     "shortcuts": {},
     "voice_en": "en-GB-RyanNeural",
     "voice_fr": "fr-FR-HenriNeural",
+    "user_name": "",
+    "weather_city": "",
 }
 
 if not CONFIG_PATH.exists():
@@ -636,6 +638,10 @@ def process_utterance(whisper, audio):
         set_state("idle")
         return
     print(f"🎙 {text}")
+    if BRIEFING_TRIGGERS.search(text):
+        run_daily_briefing()
+        followup_until = time.time() + FOLLOWUP_WINDOW
+        return
     set_state("thinking", text)
     try:
         answer = think(text)
@@ -683,7 +689,6 @@ def quit_jarvis():
 ORB_HTML = (APP_DIR / "orb.html").read_text(encoding="utf-8")
 HOME_HTML = (APP_DIR / "home.html").read_text(encoding="utf-8")
 ORB_SIZE = 170
-HOME_W, HOME_H = 900, 560
 MARGIN = 24
 
 
@@ -733,10 +738,18 @@ class OrbApi:
             "time": now.strftime("%H:%M"),
             "date": f"{weekday_pt}, {now.day} de {month_pt}" if CFG["language"] == "pt"
                     else now.strftime("%A, %B %-d"),
-            "greeting": f"{greet_word}, {CFG['user_title']}.",
+            "greeting": f"{greet_word}, {CFG.get('user_name') or CFG['user_title']}.",
             "agenda": _parse_agenda(),
+            "weather": fetch_weather(),
+            "topic": HOME_MODE["topic"],
             "state": STATE,
         }
+
+    def show_briefing(self):
+        if HOME_MODE["active"]:
+            return "already_active"
+        threading.Thread(target=run_daily_briefing, daemon=True).start()
+        return "ok"
 
 
 def _parse_agenda():
@@ -753,39 +766,157 @@ def _parse_agenda():
     return sorted(items, key=lambda e: e["time"])[:6]
 
 
+WMO_DESC_PT = {
+    0: "céu limpo", 1: "poucas nuvens", 2: "parcialmente nublado", 3: "nublado",
+    45: "névoa", 48: "névoa com geada", 51: "garoa fraca", 53: "garoa", 55: "garoa forte",
+    61: "chuva fraca", 63: "chuva", 65: "chuva forte", 71: "neve fraca", 73: "neve",
+    75: "neve forte", 80: "pancadas de chuva", 81: "pancadas de chuva fortes",
+    95: "trovoadas", 96: "trovoadas com granizo",
+}
+WMO_DESC_EN = {
+    0: "clear skies", 1: "mostly clear", 2: "partly cloudy", 3: "cloudy",
+    45: "foggy", 48: "foggy", 51: "light drizzle", 53: "drizzle", 55: "heavy drizzle",
+    61: "light rain", 63: "rain", 65: "heavy rain", 71: "light snow", 73: "snow",
+    75: "heavy snow", 80: "rain showers", 81: "heavy rain showers",
+    95: "thunderstorms", 96: "thunderstorms with hail",
+}
+_weather_cache = {"data": None, "at": 0}
+
+
+def fetch_weather():
+    city = CFG.get("weather_city")
+    if not city:
+        return None
+    if _weather_cache["data"] is not None and time.time() - _weather_cache["at"] < 600:
+        return _weather_cache["data"]
+    try:
+        import requests
+        geo = requests.get("https://geocoding-api.open-meteo.com/v1/search",
+                           params={"name": city, "count": 1}, timeout=8).json()
+        results = geo.get("results")
+        if not results:
+            return None
+        lat, lon = results[0]["latitude"], results[0]["longitude"]
+        wx = requests.get("https://api.open-meteo.com/v1/forecast",
+                          params={"latitude": lat, "longitude": lon,
+                                  "current": "temperature_2m,weather_code",
+                                  "timezone": "auto"}, timeout=8).json()
+        cur = wx.get("current", {})
+        code = cur.get("weather_code")
+        table = WMO_DESC_PT if CFG["language"] == "pt" else WMO_DESC_EN
+        result = {"temp": round(cur.get("temperature_2m", 0)), "desc": table.get(code, "-"),
+                  "city": results[0].get("name", city)}
+        _weather_cache["data"], _weather_cache["at"] = result, time.time()
+        return result
+    except Exception:  # noqa: BLE001
+        return _weather_cache["data"]
+
+
 def _default_home(win):
     screen = webview.screens[0] if webview.screens else None
     sw, sh = (screen.width, screen.height) if screen else (1440, 900)
     return sw - ORB_SIZE - MARGIN, sh - ORB_SIZE - MARGIN
 
 
+HOME_MODE = {"active": False, "topic": None}
+BRIEFING_TRIGGERS = re.compile(
+    r"\b(abr[ae]\s+(a\s+)?(sua\s+)?home|resumo\s+do\s+dia|vis[aã]o\s+geral|"
+    r"atualiza[cç][oõ]es\s+do\s+dia|panorama\s+do\s+dia|"
+    r"(daily\s+)?(overview|briefing)|open\s+(your\s+)?home)\b", re.I)
+
+
+def run_daily_briefing():
+    """A scripted, deterministic morning-briefing sequence (not left to the
+    LLM to improvise) - real name, real time, real weather, real agenda -
+    while the fullscreen HUD highlights whichever panel is being narrated."""
+    if HOME_MODE["active"]:
+        return
+    HOME_MODE["active"] = True
+    HOME_MODE["topic"] = None
+    try:
+        name = CFG.get("user_name") or CFG["user_title"]
+        now = datetime.now()
+        hour = now.hour
+        pt = CFG["language"] == "pt"
+        greet = ("Bom dia" if hour < 12 else "Boa tarde" if hour < 18 else "Boa noite") if pt \
+            else ("Good morning" if hour < 12 else "Good afternoon" if hour < 18 else "Good evening")
+
+        greeting_text = f"{greet}, {name}. " + (f"São {now.strftime('%H:%M')} agora." if pt
+                        else f"It's {now.strftime('%H:%M')} right now.")
+
+        weather = fetch_weather()
+        weather_text = None
+        if weather:
+            weather_text = (f"Estão {weather['temp']} graus em {weather['city']}, {weather['desc']}." if pt
+                            else f"It's {weather['temp']} degrees in {weather['city']}, {weather['desc']}.")
+
+        agenda = _parse_agenda()
+        if agenda:
+            preview = "; ".join(f"{a['title']} às {a['time']}" if pt else f"{a['title']} at {a['time']}"
+                                for a in agenda[:3] if a["time"])
+            n = len(agenda)
+            agenda_text = (f"Você tem {n} compromisso{'s' if n != 1 else ''} hoje. {preview}." if pt
+                          else f"You have {n} item{'s' if n != 1 else ''} on your calendar today. {preview}.")
+        else:
+            agenda_text = "Nada agendado para hoje — dia livre." if pt else "Nothing on the calendar today - a clear day."
+
+        close_text = "Esse é o resumo do seu dia. Diga se precisar de mais alguma coisa." if pt \
+            else "That's your day in a nutshell. Say the word if you need anything else."
+
+        for topic, text in (("greeting", greeting_text), ("weather", weather_text),
+                            ("agenda", agenda_text), (None, close_text)):
+            if not text:
+                continue
+            HOME_MODE["topic"] = topic
+            speak(text)
+    finally:
+        HOME_MODE["topic"] = None
+        HOME_MODE["active"] = False
+
+
 def orb_position_loop(win):
     """Rests bottom-right (or wherever the user last dragged it to) as a
-    small orb when idle, and expands into the full HUD 'home' screen -
-    clock, agenda, big orb with equalizer - centered on screen while
-    listening, thinking, or speaking."""
+    small orb when idle, and glides to screen-center - still a small orb -
+    for ordinary questions. The full-screen HUD 'home' screen is separate:
+    it only opens when HOME_MODE['active'] is set (daily briefing request or
+    a triple-click), takes over fullscreen, then hands control back here."""
     home = (CFG["orb_x"], CFG["orb_y"])
     if home[0] is None:
         home = _default_home(win)
     win.move(*home)
     last_known, moving_until, last_mode = home, 0.0, "idle"
+    home_screen_open = False
 
     while True:
-        time.sleep(.3)
+        time.sleep(.15)
+
+        if HOME_MODE["active"]:
+            if not home_screen_open:
+                win.load_html(HOME_HTML)
+                win.toggle_fullscreen()
+                home_screen_open = True
+            last_mode = STATE["mode"]
+            continue
+        elif home_screen_open:
+            win.toggle_fullscreen()
+            win.load_html(ORB_HTML)
+            win.resize(ORB_SIZE, ORB_SIZE)
+            win.move(*home)
+            last_known, moving_until = home, time.time() + .6
+            home_screen_open = False
+            last_mode = "idle"
+            continue
+
         mode = STATE["mode"]
         now = time.time()
 
         if mode != "idle" and last_mode == "idle":
             screen = webview.screens[0] if webview.screens else None
             sw, sh = (screen.width, screen.height) if screen else (1440, 900)
-            target = (sw // 2 - HOME_W // 2, sh // 2 - HOME_H // 2)
-            win.load_html(HOME_HTML)
-            win.resize(HOME_W, HOME_H)
+            target = (sw // 2 - ORB_SIZE // 2, sh // 2 - ORB_SIZE // 2)
             win.move(*target)
             last_known, moving_until = target, now + .6
         elif mode == "idle" and last_mode != "idle":
-            win.load_html(ORB_HTML)
-            win.resize(ORB_SIZE, ORB_SIZE)
             win.move(*home)
             last_known, moving_until = home, now + .6
 

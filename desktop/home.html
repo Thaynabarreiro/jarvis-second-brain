@@ -52,7 +52,7 @@
 
   <!-- LEFT: clock + greeting -->
   <div style="position:absolute;top:32px;left:32px;width:270px;z-index:3">
-    <div class="panel">
+    <div class="panel" id="panel-greeting">
       <div class="glow"></div>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
         <span style="font-size:16px;font-weight:500;letter-spacing:-.04em">move ai</span>
@@ -66,12 +66,27 @@
 
   <!-- LEFT: agenda -->
   <div style="position:absolute;top:230px;left:32px;width:270px;z-index:3">
-    <div class="panel">
+    <div class="panel" id="panel-agenda">
       <div class="glow"></div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
         <span class="label">Hoje &middot; agenda</span>
       </div>
       <div id="agenda" style="display:flex;flex-direction:column"></div>
+    </div>
+  </div>
+
+  <!-- RIGHT: weather -->
+  <div id="weatherWrap" style="position:absolute;top:32px;right:32px;width:250px;z-index:3;display:none">
+    <div class="panel" id="panel-weather">
+      <div class="glow"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <span class="label">Clima</span>
+        <span id="weatherCity" class="mono" style="font-size:11px;color:var(--paper)"></span>
+      </div>
+      <div style="display:flex;align-items:baseline;gap:10px">
+        <span id="weatherTemp" style="font-size:42px;font-weight:500;letter-spacing:-.04em;line-height:1">--&deg;</span>
+        <span id="weatherDesc" style="font-size:13px;font-weight:500;color:var(--ash)"></span>
+      </div>
     </div>
   </div>
 
@@ -129,6 +144,26 @@ function applyMode(mode, text){
   $('caption').textContent=mode==='idle'?'':(text||'');
 }
 
+const PANEL_IDS={greeting:'panel-greeting',weather:'panel-weather',agenda:'panel-agenda'};
+function setActiveTopic(topic){
+  Object.entries(PANEL_IDS).forEach(([key,id])=>{
+    const el=$(id);if(!el)return;
+    const active=topic===key;
+    el.querySelector('.glow').style.opacity=active?1:0;
+    el.style.opacity=topic?(active?1:.32):1;
+    el.style.transform=active?'scale(1.03)':'scale(1)';
+    el.style.transition='opacity .35s ease, transform .35s ease';
+  });
+}
+
+function renderWeather(w){
+  if(!w){$('weatherWrap').style.display='none';return;}
+  $('weatherWrap').style.display='block';
+  $('weatherCity').textContent=w.city||'';
+  $('weatherTemp').innerHTML=Math.round(w.temp)+'&deg;';
+  $('weatherDesc').textContent=w.desc||'';
+}
+
 function renderAgenda(items){
   const el=$('agenda');
   if(!items||!items.length){el.innerHTML='<div class="mono" style="font-size:11px;color:var(--ash);padding:8px 0">Nada agendado.</div>';return;}
@@ -147,6 +182,8 @@ async function refresh(){
     $('dateStr').textContent=d.date;
     $('greeting').textContent=d.greeting;
     renderAgenda(d.agenda);
+    renderWeather(d.weather);
+    setActiveTopic(d.topic);
     applyMode(d.state.mode, d.state.text);
   }catch(e){}
 }

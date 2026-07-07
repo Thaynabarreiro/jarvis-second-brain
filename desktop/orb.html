@@ -123,9 +123,21 @@ setInterval(async()=>{ // sync with the daemon
   try{const s=await window.pywebview.api.get_state();state=s.mode;}catch(e){}
 },250);
 const canvas=document.getElementById('orb');
-canvas.addEventListener('click',()=>{ // click = wake / interrupt
+// single click = wake/interrupt, triple click = open the daily briefing HUD
+let clickCount=0,clickTimer=null;
+canvas.addEventListener('click',()=>{
   if(quitting)return;
-  try{window.pywebview.api.wake();}catch(e){}
+  clickCount++;
+  if(clickCount>=3){
+    clearTimeout(clickTimer);clickCount=0;
+    try{window.pywebview.api.show_briefing();}catch(e){}
+    return;
+  }
+  clearTimeout(clickTimer);
+  clickTimer=setTimeout(()=>{
+    if(clickCount>0){try{window.pywebview.api.wake();}catch(e){}}
+    clickCount=0;
+  },320);
 });
 
 // hold ~1s without moving the mouse = quit

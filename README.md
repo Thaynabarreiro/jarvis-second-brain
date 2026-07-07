@@ -143,6 +143,8 @@ Win+R, type `shell:startup`, drop the shortcut there.)
   "nvidia_model": "openai/gpt-oss-120b",
   "voice_en": "en-GB-RyanNeural",
   "voice_fr": "fr-FR-HenriNeural",
+  "user_name": "",
+  "weather_city": "",
   "shortcuts": {
     "site pricing sheet": "https://docs.google.com/spreadsheets/d/…"
   }
@@ -156,19 +158,26 @@ Win+R, type `shell:startup`, drop the shortcut there.)
 - `language`: your default/primary language (`pt`, `en`, `fr`) - used for the default greeting tone
 - `notes_dir`: your markdown notes folder; leave `""` to disable notes search
 - `user_title`: how the butler addresses you (`sir`, `senhora`, …)
+- `user_name`: your first name, used in the daily briefing ("Good morning, Thayna")
+- `weather_city`: a city name (e.g. "Porto") for the weather in the daily briefing - free via
+  Open-Meteo, no API key needed. Leave `""` to skip weather.
 - `orb_x` / `orb_y`: remembers where you last dragged the orb to rest; leave `null` for bottom-right
 - `shortcuts`: name → URL pairs. Say "open [name]" and Jarvis opens that exact link - no guessing,
   it always uses the URL you configured. Great for spreadsheets, dashboards, or sites you open
   often. Add as many as you like.
 
-### The orb and the home screen
+### The orb, and the daily briefing home screen
 
 A small particle orb rests in the bottom-right corner (or wherever you last dragged it) while
-idle - **drag it anywhere** with the mouse, its new resting spot is remembered even after
-restarting. The instant you wake Jarvis, it expands into a full HUD **home screen** centered on
-your display: a clock/date/greeting panel, today's real agenda, and a big glowing orb with a live
-equalizer that reacts to listening/thinking/speaking. It shrinks back to the small standby orb the
-moment he's done answering.
+idle, and glides - still small - to screen-center for ordinary questions. **Drag it anywhere**
+with the mouse; its resting spot is remembered even after restarting.
+
+The **full HUD home screen** is separate and doesn't open for every question - only when you ask
+for it: say **"Hey Jarvis, give me my daily overview"** (or "resumo do dia", "abra sua home",
+"visão geral"), or **triple-click the orb**. It takes over the screen fullscreen with a real,
+scripted briefing - your name, the time, the weather (if `weather_city` is set), and your actual
+calendar - narrated topic by topic while the matching card lights up and the rest dim, then closes
+itself and shrinks back to the small standby orb when done.
 
 ## Try saying
 
@@ -178,6 +187,7 @@ moment he's done answering.
 - "Hey Jarvis — remember that my husband's laptop uses the English voice."
 - "Hey Jarvis — what's on my calendar today?"
 - "Hey Jarvis, can you answer me in English from now on?" / "Hey Jarvis, réponds-moi en français."
+- "Hey Jarvis, give me my daily overview." / triple-click the orb — opens the full HUD briefing
 
 ---
 
