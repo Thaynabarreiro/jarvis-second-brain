@@ -144,18 +144,20 @@ live voice assistant. Mistral Large and the older Nemotron models weren't availa
 tier at all.)
 
 1. Create a free key at <https://build.nvidia.com/settings/api-keys>.
-2. In `config.json`, set:
-   ```json
-   "provider": "nvidia",
-   "nvidia_api_key": "nvapi-…",
-   "nvidia_model": "openai/gpt-oss-120b"
-   ```
-3. Restart Jarvis.
+2. Paste it into `config.json`'s `"nvidia_api_key"` field (leave `"provider": "anthropic"` for now).
+3. Restart Jarvis once so it picks up the key.
+4. **Click the ⚙ gear that appears in the corner of the orb** → pick **"Anthropic"** or
+   **"Grátis (NVIDIA)"** any time - it switches instantly, no restart, no editing files.
 
-**Trade-off to know about:** this path has no vision support, so "what's on my screen" won't work
-while `provider` is `nvidia` - the screenshot tool is simply left out in that mode. Everything else
-(notes, calendars, run_command, run_claude_code, memory, Slack) works the same. Set `provider`
-back to `"anthropic"` any time to restore the default brain and screen vision.
+**About screen vision on the free brain:** `gpt-oss-120b` itself can't see images, but you don't
+lose the feature - ask "what's on my screen?" while on the free brain and it automatically
+borrows a vision-capable Anthropic call just for that one look, then hands the description back
+to the free brain to keep talking. Slightly less private and not literally free for that one
+call, but the capability doesn't disappear. Everything else (notes, calendars, run_command,
+run_claude_code, memory, Slack) works identically on both brains.
+
+**Image generation:** not wired in yet - NVIDIA's image models live on a different API surface
+than the chat models tested here, so this is a genuine follow-up, not something quietly faked.
 
 ## 📅 Google Calendar setup (optional)
 

@@ -382,14 +382,41 @@ def think_anthropic(user_text):
     return "I got lost in my own tools. Embarrassing. Could you repeat that?"
 
 
+def tool_describe_screen(_args):
+    """Used only when the free NVIDIA brain is active: gpt-oss-120b can't see
+    images, so this quietly borrows a vision-capable Anthropic model for a
+    single call just to describe the screen, then hands the description back
+    as plain text to the ongoing conversation."""
+    shot = tool_screenshot({})
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=API_KEY)
+        resp = client.messages.create(
+            model="claude-sonnet-5", max_tokens=400,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": shot["data"]}},
+                {"type": "text", "text": "Describe concisely (2-4 sentences) what is visible on this screen, "
+                                          "focused on whatever the user likely wants to know about."},
+            ]}])
+        return "".join(b.text for b in resp.content if b.type == "text").strip()
+    except Exception as e:  # noqa: BLE001
+        return f"(couldn't analyze the screen: {e})"
+
+
+TOOL_FNS["describe_screen"] = tool_describe_screen
+
 # Free alternative brain: any OpenAI-compatible endpoint (tested with NVIDIA's
 # hosted NIM API, model openai/gpt-oss-120b - fast and reliable at tool use).
-# No vision support, so the screenshot tool is left out of this path.
+# gpt-oss-120b itself can't see images, so 'screenshot' is swapped out for
+# 'describe_screen', which borrows Anthropic vision just for that one call.
 NVIDIA_TOOL_DEFS = [
     {"type": "function", "function": {
         "name": t["name"], "description": t["description"], "parameters": t["input_schema"]}}
     for t in TOOL_DEFS if t["name"] != "screenshot"
-]
+] + [{"type": "function", "function": {
+    "name": "describe_screen",
+    "description": "Describes what's currently on screen. Use whenever asked about the screen, an open app, or 'what am I looking at' - even though this brain can't see directly, this tool can.",
+    "parameters": {"type": "object", "properties": {}}}}]
 
 
 def think_nvidia(user_text):
@@ -639,6 +666,24 @@ class OrbApi:
 
     def quit(self):
         quit_jarvis()
+
+    def get_provider(self):
+        return {"provider": CFG.get("provider", "anthropic"),
+                "nvidia_ready": bool(CFG.get("nvidia_api_key"))}
+
+    def set_provider(self, provider):
+        if provider not in ("anthropic", "nvidia"):
+            return "invalid"
+        if provider == "nvidia" and not CFG.get("nvidia_api_key"):
+            return "no_nvidia_key"
+        CFG["provider"] = provider
+        try:
+            on_disk = json.loads(CONFIG_PATH.read_text())
+            on_disk["provider"] = provider
+            CONFIG_PATH.write_text(json.dumps(on_disk, indent=2, ensure_ascii=False))
+        except Exception:  # noqa: BLE001
+            pass
+        return "ok"
 
 
 def _default_home(win):

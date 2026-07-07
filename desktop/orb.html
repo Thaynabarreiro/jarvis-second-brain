@@ -1,10 +1,29 @@
 <!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
-  html,body{margin:0;background:transparent;overflow:hidden;height:100%}
+  html,body{margin:0;background:transparent;overflow:hidden;font-family:-apple-system,sans-serif}
+  body{width:170px;height:170px;position:relative}
   canvas{display:block;cursor:pointer}
+  #gear{position:absolute;top:4px;right:6px;width:22px;height:22px;border-radius:50%;
+    background:rgba(10,16,28,.55);color:#bcd8f0;border:none;font-size:12px;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;opacity:.55;transition:opacity .2s}
+  #gear:hover{opacity:1}
+  #menu{position:absolute;inset:0;background:rgba(6,10,20,.88);border-radius:50%;
+    display:none;flex-direction:column;align-items:center;justify-content:center;gap:6px;
+    color:#dceeff;font-size:10px;text-align:center;padding:14px;box-sizing:border-box}
+  #menu.open{display:flex}
+  #menu button{width:100%;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);
+    color:#dceeff;border-radius:8px;padding:5px 4px;font-size:10px;cursor:pointer}
+  #menu button.active{background:rgba(120,190,255,.35);border-color:#7fd4ff}
+  #menu .label{font-size:9px;opacity:.6;margin-top:2px}
 </style></head>
 <body>
 <canvas id="orb" width="340" height="340" style="width:170px;height:170px"></canvas>
+<button id="gear" title="Cérebro">⚙</button>
+<div id="menu">
+  <button id="pick-anthropic">Anthropic</button>
+  <button id="pick-nvidia">Grátis (NVIDIA)</button>
+  <div class="label" id="menu-status"></div>
+</div>
 <script>
 // Arc-reactor style assistant orb: glowing core, counter-rotating particle
 // shells, tilted orbital rings. States: idle | listening | thinking | speaking.
@@ -123,5 +142,31 @@ canvas.addEventListener('pointermove',e=>{
 });
 canvas.addEventListener('pointerup',()=>clearTimeout(quitTimer));
 canvas.addEventListener('pointerleave',()=>clearTimeout(quitTimer));
+
+// ---------------- brain switch (Anthropic <-> free NVIDIA) ----------------
+const gear=document.getElementById('gear'),menu=document.getElementById('menu');
+const btnA=document.getElementById('pick-anthropic'),btnN=document.getElementById('pick-nvidia');
+const menuStatus=document.getElementById('menu-status');
+async function refreshProviderUI(){
+  try{
+    const s=await window.pywebview.api.get_provider();
+    btnA.classList.toggle('active',s.provider==='anthropic');
+    btnN.classList.toggle('active',s.provider==='nvidia');
+    menuStatus.textContent=s.nvidia_ready?'':'(sem chave NVIDIA)';
+  }catch(e){}
+}
+gear.addEventListener('click',e=>{
+  e.stopPropagation();
+  menu.classList.toggle('open');
+  if(menu.classList.contains('open'))refreshProviderUI();
+});
+async function pick(provider){
+  const r=await window.pywebview.api.set_provider(provider);
+  if(r==='no_nvidia_key'){menuStatus.textContent='Adicione nvidia_api_key no config.json';return;}
+  await refreshProviderUI();
+  setTimeout(()=>menu.classList.remove('open'),500);
+}
+btnA.addEventListener('click',e=>{e.stopPropagation();pick('anthropic');});
+btnN.addEventListener('click',e=>{e.stopPropagation();pick('nvidia');});
 </script>
 </body></html>
