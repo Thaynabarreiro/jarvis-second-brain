@@ -1,9 +1,10 @@
 # Jarvis — System-Wide AI Butler 🎩
 
 A professional, open-source-stack voice assistant that runs on your machine — not in a browser
-tab. Say **"Hey Jarvis"** from any app, and a floating particle orb wakes up, listens, thinks,
-and talks back. It knows your notes, sees your screen, runs commands, downloads files, and
-remembers what you teach it.
+tab. Say **"Hey Jarvis"** from any app, and a floating particle orb expands into a full HUD home
+screen — clock, today's agenda, a glowing orb with a live equalizer — listens, thinks, and talks
+back, then shrinks back to a small standby orb. It knows your notes, sees your screen, runs
+commands, downloads files, speaks Portuguese/English/French, and remembers what you teach it.
 
 Two versions live in this repo:
 
@@ -37,6 +38,9 @@ Two versions live in this repo:
 Wake it three ways: say **"Hey Jarvis"**, **clap twice**, or **click the orb**.
 Speak over it ("Hey Jarvis…") to interrupt mid-sentence. After he answers, he keeps listening
 for **6 seconds** without needing the wake word again, for a natural back-and-forth.
+
+Speaks Portuguese by default and switches fluently to English or French whenever you do - both
+transcription and the reply voice follow along automatically.
 
 The first time you ask about your calendar, **macOS will show a permission popup** ("Terminal"
 or "Python" wants to control Calendar) — click Allow. If you miss it or say no, Jarvis will tell
@@ -88,20 +92,33 @@ To quit Jarvis, either:
 - **Hold the orb down for about a second** - it dims and closes, no window-hunting needed, or
 - Double-click **`Stop-Jarvis.command`** (Mac) / **`stop-jarvis.bat`** (Windows) in `desktop/`.
 
-### Auto-start at login (optional, Mac)
+### Auto-start at login, and coming back from a full quit
 
 Voice/clap wake-up only works while Jarvis is already running - it can't hear "Hey Jarvis" before
-it's open. The fix is to have it start itself automatically every time you log into the Mac, so
-you never touch the launcher file again:
+it's open. Two pieces solve this:
 
+- Jarvis starts itself automatically every time you log in.
+- A tiny **standby listener** (`wake_sentinel.py`) - just the mic + wake-word model, no Whisper,
+  no orb window, cheap enough to run all the time - takes over the instant you fully quit Jarvis
+  (holding the orb, Stop-Jarvis, Task Manager, however). Say "Hey Jarvis" or clap twice and it
+  relaunches the full app, then gets out of the way. You never touch a launcher file again.
+
+**Mac:**
 ```bash
 cd desktop
 ./install-autostart.sh
 ```
+Installs two LaunchAgents (`com.jarvis.assistant` for login start, `com.jarvis.sentinel` with
+auto-restart for the standby listener). Safe to run while Jarvis is already open - the
+duplicate-instance guard makes it a no-op instead of opening a second copy. To undo:
+`./uninstall-autostart.sh`.
 
-This installs a macOS LaunchAgent (`~/Library/LaunchAgents/com.jarvis.assistant.plist`) that runs
-Jarvis at every login. It's safe to run even while Jarvis is already open - the duplicate-instance
-guard makes it a no-op instead of opening a second copy. To undo: `./uninstall-autostart.sh`.
+**Windows:** put shortcuts to both `start-jarvis-desktop.bat` and `start-wake-sentinel.bat` in
+your Startup folder (Win+R → type `shell:startup` → drop both shortcuts there). Both start at
+login. Note: unlike the Mac version, the Windows sentinel doesn't auto-restart itself after
+handing off to the full app - the first "quit fully, then say Hey Jarvis" after each login works,
+but after that, use `start-jarvis-desktop.bat` again to reopen it. A more complete Windows
+auto-restart (Task Scheduler) is a reasonable next step if this matters enough to you.
 
 (Windows equivalent: put a shortcut to `start-jarvis-desktop.bat` in your Startup folder -
 Win+R, type `shell:startup`, drop the shortcut there.)
@@ -124,6 +141,8 @@ Win+R, type `shell:startup`, drop the shortcut there.)
   "provider": "anthropic",
   "nvidia_api_key": "",
   "nvidia_model": "openai/gpt-oss-120b",
+  "voice_en": "en-GB-RyanNeural",
+  "voice_fr": "fr-FR-HenriNeural",
   "shortcuts": {
     "site pricing sheet": "https://docs.google.com/spreadsheets/d/…"
   }
@@ -131,8 +150,10 @@ Win+R, type `shell:startup`, drop the shortcut there.)
 ```
 
 - `model`: `claude-sonnet-5` is the default for a snappy voice assistant. Switch to `claude-opus-4-8` for a smarter but slower brain.
-- `voice`: any edge-tts voice (`edge-tts --list-voices`), e.g. `en-GB-RyanNeural` for English
-- `language`: speech-recognition language (`pt`, `en`, …)
+- `voice` / `voice_en` / `voice_fr`: any edge-tts voice (`edge-tts --list-voices`) for each
+  language. Jarvis transcribes and replies in whichever of Portuguese/English/French you're
+  speaking, and picks the matching voice automatically.
+- `language`: your default/primary language (`pt`, `en`, `fr`) - used for the default greeting tone
 - `notes_dir`: your markdown notes folder; leave `""` to disable notes search
 - `user_title`: how the butler addresses you (`sir`, `senhora`, …)
 - `orb_x` / `orb_y`: remembers where you last dragged the orb to rest; leave `null` for bottom-right
@@ -140,11 +161,14 @@ Win+R, type `shell:startup`, drop the shortcut there.)
   it always uses the URL you configured. Great for spreadsheets, dashboards, or sites you open
   often. Add as many as you like.
 
-### The orb's behavior
+### The orb and the home screen
 
-It rests in the bottom-right corner (or wherever you last dragged it) when idle, and glides to the
-center of the screen while listening, thinking, or speaking. **Drag it anywhere** with the mouse —
-its new resting spot is remembered automatically, even after restarting Jarvis.
+A small particle orb rests in the bottom-right corner (or wherever you last dragged it) while
+idle - **drag it anywhere** with the mouse, its new resting spot is remembered even after
+restarting. The instant you wake Jarvis, it expands into a full HUD **home screen** centered on
+your display: a clock/date/greeting panel, today's real agenda, and a big glowing orb with a live
+equalizer that reacts to listening/thinking/speaking. It shrinks back to the small standby orb the
+moment he's done answering.
 
 ## Try saying
 
@@ -153,6 +177,7 @@ its new resting spot is remembered automatically, even after restarting Jarvis.
 - "Hey Jarvis — download the latest n8n release to my Downloads folder."
 - "Hey Jarvis — remember that my husband's laptop uses the English voice."
 - "Hey Jarvis — what's on my calendar today?"
+- "Hey Jarvis, can you answer me in English from now on?" / "Hey Jarvis, réponds-moi en français."
 
 ---
 

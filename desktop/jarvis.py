@@ -49,6 +49,8 @@ DEFAULT_CONFIG = {
     "nvidia_api_key": "",
     "nvidia_model": "openai/gpt-oss-120b",
     "shortcuts": {},
+    "voice_en": "en-GB-RyanNeural",
+    "voice_fr": "fr-FR-HenriNeural",
 }
 
 if not CONFIG_PATH.exists():
@@ -332,6 +334,19 @@ TOOL_FNS = {"run_command": tool_run_command, "screenshot": tool_screenshot,
 
 # ---------------------------------------------------------------- brain
 HISTORY = []
+_last_lang = None
+LANG_TAG_RE = re.compile(r"\s*\[LANG:(pt|en|fr)\]\s*$", re.I)
+
+
+def extract_lang_tag(text):
+    """Strips the trailing [LANG:xx] marker the model is instructed to add,
+    returning (clean_text, lang_code_or_None) - drives which TTS voice speaks
+    the reply, without relying on a text-language-guesser (too unreliable on
+    short sentences)."""
+    m = LANG_TAG_RE.search(text)
+    if not m:
+        return text, None
+    return LANG_TAG_RE.sub("", text), m.group(1).lower()
 
 
 def system_prompt():
@@ -340,7 +355,7 @@ def system_prompt():
     shortcuts = CFG.get("shortcuts") or {}
     shortcuts_block = "\n".join(f'- "{name}" -> {url}' for name, url in shortcuts.items()) or "(none configured)"
     open_cmd = "open" if platform.system() == "Darwin" else "start" if platform.system() == "Windows" else "xdg-open"
-    return f"""You are Jarvis: an impeccably polite, dry-witted British butler. Speak {lang}. Address the user as "{CFG['user_title']}" occasionally (not every sentence). One genuinely funny line beats three bland ones.
+    return f"""You are Jarvis: an impeccably polite, dry-witted British butler. Default language is {lang}, but switch fluently to English or French whenever the user speaks or writes in that language, or explicitly asks for it - then switch back once they do. Address the user as "{CFG['user_title']}" occasionally (not every sentence). One genuinely funny line beats three bland ones.
 
 You run as a system assistant on {platform.system()} with real tools: shell, screen capture, notes search, the Mac Calendar, Google Calendar, Outlook Calendar, delegating real coding/writing tasks to Claude Code in a project folder, and long-term memory. Act: when asked to download, open, find or do something on the computer, DO it with run_command instead of explaining how - create a missing folder first if needed rather than giving up. Use run_claude_code (not run_command) for substantial project work - writing plans, code, or documents inside a folder - since it gives Claude Code its own context window for that task. iCloud Drive files (including the Obsidian vault) are regular folders under the user's home directory - read them with run_command like any other file. If something fails, try an alternative path before giving up.
 
@@ -348,6 +363,8 @@ Named shortcuts (open the EXACT url below via run_command with `{open_cmd} "URL"
 {shortcuts_block}
 
 Your answers are SPOKEN aloud: keep them short (1-3 sentences), no markdown, no lists, no long URLs. Important facts you learn about the user -> use remember.
+
+CRITICAL: end every reply with the language you just answered in, on its own final line, exactly like one of: [LANG:pt] [LANG:en] [LANG:fr] - this drives which voice speaks it, so never skip it and never explain it.
 
 Date and time: {datetime.now().strftime('%A, %Y-%m-%d %H:%M')}
 Long-term memory:
@@ -371,7 +388,9 @@ def think_anthropic(user_text):
             model=CFG["model"], max_tokens=500, system=system_prompt(),
             tools=TOOL_DEFS, messages=local)
         if resp.stop_reason != "tool_use":
+            global _last_lang
             text = "".join(b.text for b in resp.content if b.type == "text").strip()
+            text, _last_lang = extract_lang_tag(text or "...")
             HISTORY.append({"role": "assistant", "content": text or "..."})
             return text or "..."
         local.append({"role": "assistant", "content": resp.content})
@@ -438,7 +457,9 @@ def think_nvidia(user_text):
             tools=NVIDIA_TOOL_DEFS, tool_choice="auto", messages=local)
         msg = resp.choices[0].message
         if not msg.tool_calls:
+            global _last_lang
             text = (msg.content or "...").strip()
+            text, _last_lang = extract_lang_tag(text)
             HISTORY.append({"role": "assistant", "content": text})
             return text
         local.append({"role": "assistant", "content": msg.content, "tool_calls": [
@@ -476,9 +497,10 @@ def speak(text):
     import edge_tts
     clean = re.sub(r"[*_#`\[\]]", "", text)
     path = JARVIS_HOME / "reply.mp3"
+    voice = {"en": CFG.get("voice_en"), "fr": CFG.get("voice_fr")}.get(_last_lang) or CFG["voice"]
 
     async def gen():
-        await edge_tts.Communicate(clean, CFG["voice"], rate="+8%").save(str(path))
+        await edge_tts.Communicate(clean, voice, rate="+8%").save(str(path))
     try:
         asyncio.run(gen())
         data, sr = _decode_audio(path)
@@ -606,12 +628,15 @@ def handle_interaction(stream, whisper, oww, lead=None):
 def process_utterance(whisper, audio):
     global followup_until
     set_state("thinking")
-    segs, _info = whisper.transcribe(audio, language=CFG["language"], beam_size=2, vad_filter=True)
+    # auto-detect (pt/en/fr etc.) instead of a fixed language, so switching
+    # tongues mid-conversation transcribes correctly, not just replies correctly
+    segs, _info = whisper.transcribe(audio, language=None, beam_size=2, vad_filter=True)
     text = " ".join(s.text for s in segs).strip()
     if not text:
         set_state("idle")
         return
     print(f"🎙 {text}")
+    set_state("thinking", text)
     try:
         answer = think(text)
     except Exception as e:  # noqa: BLE001
@@ -656,7 +681,9 @@ def quit_jarvis():
 
 # ---------------------------------------------------------------- orb
 ORB_HTML = (APP_DIR / "orb.html").read_text(encoding="utf-8")
+HOME_HTML = (APP_DIR / "home.html").read_text(encoding="utf-8")
 ORB_SIZE = 170
+HOME_W, HOME_H = 900, 560
 MARGIN = 24
 
 
@@ -692,6 +719,39 @@ class OrbApi:
             pass
         return "ok"
 
+    def get_home_data(self):
+        now = datetime.now()
+        hour = now.hour
+        greet_word = ("Bom dia" if CFG["language"] == "pt" else "Good morning") if hour < 12 else \
+                     ("Boa tarde" if CFG["language"] == "pt" else "Good afternoon") if hour < 18 else \
+                     ("Boa noite" if CFG["language"] == "pt" else "Good evening")
+        weekday_pt = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira",
+                      "Sexta-feira", "Sábado", "Domingo"][now.weekday()]
+        month_pt = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho",
+                    "agosto", "setembro", "outubro", "novembro", "dezembro"][now.month - 1]
+        return {
+            "time": now.strftime("%H:%M"),
+            "date": f"{weekday_pt}, {now.day} de {month_pt}" if CFG["language"] == "pt"
+                    else now.strftime("%A, %B %-d"),
+            "greeting": f"{greet_word}, {CFG['user_title']}.",
+            "agenda": _parse_agenda(),
+            "state": STATE,
+        }
+
+
+def _parse_agenda():
+    raw = tool_read_calendar({"days_ahead": 1})
+    if raw.startswith(("BLOCKED", "(")):
+        return []
+    items = []
+    for line in raw.splitlines():
+        if " -- " not in line:
+            continue
+        title, when = line.split(" -- ", 1)
+        m = re.search(r"(\d{1,2}:\d{2})", when)
+        items.append({"time": m.group(1) if m else "", "title": title.strip()})
+    return sorted(items, key=lambda e: e["time"])[:6]
+
 
 def _default_home(win):
     screen = webview.screens[0] if webview.screens else None
@@ -700,9 +760,10 @@ def _default_home(win):
 
 
 def orb_position_loop(win):
-    """Rests bottom-right (or wherever the user last dragged it to), glides
-    to screen-center while active, and detects manual drags to remember the
-    new resting spot."""
+    """Rests bottom-right (or wherever the user last dragged it to) as a
+    small orb when idle, and expands into the full HUD 'home' screen -
+    clock, agenda, big orb with equalizer - centered on screen while
+    listening, thinking, or speaking."""
     home = (CFG["orb_x"], CFG["orb_y"])
     if home[0] is None:
         home = _default_home(win)
@@ -717,10 +778,14 @@ def orb_position_loop(win):
         if mode != "idle" and last_mode == "idle":
             screen = webview.screens[0] if webview.screens else None
             sw, sh = (screen.width, screen.height) if screen else (1440, 900)
-            target = (sw // 2 - ORB_SIZE // 2, sh // 2 - ORB_SIZE // 2)
+            target = (sw // 2 - HOME_W // 2, sh // 2 - HOME_H // 2)
+            win.load_html(HOME_HTML)
+            win.resize(HOME_W, HOME_H)
             win.move(*target)
             last_known, moving_until = target, now + .6
         elif mode == "idle" and last_mode != "idle":
+            win.load_html(ORB_HTML)
+            win.resize(ORB_SIZE, ORB_SIZE)
             win.move(*home)
             last_known, moving_until = home, now + .6
 
