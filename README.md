@@ -102,7 +102,10 @@ To quit Jarvis, either:
   "orb_y": null,
   "slack_bot_token": "",
   "slack_app_token": "",
-  "outlook_client_id": ""
+  "outlook_client_id": "",
+  "provider": "anthropic",
+  "nvidia_api_key": "",
+  "nvidia_model": "openai/gpt-oss-120b"
 }
 ```
 
@@ -128,6 +131,31 @@ its new resting spot is remembered automatically, even after restarting Jarvis.
 - "Hey Jarvis — what's on my calendar today?"
 
 ---
+
+## 🆓 Free brain option: NVIDIA NIM (optional)
+
+Anthropic's API is what powers Jarvis by default (see the API keys section above) - it's cheap
+but not free. If you want a **$0 alternative brain**, NVIDIA hosts several open-weight models for
+free via an OpenAI-compatible API. After testing several candidates for personality quality,
+speed, and - critically - reliable tool use, **`openai/gpt-oss-120b`** came out clearly ahead:
+about 1-2 seconds per reply, correct tool calls, and Portuguese quality close to Claude Sonnet.
+(Qwen's larger model technically worked too but took 30-45 seconds per turn - unusable for a
+live voice assistant. Mistral Large and the older Nemotron models weren't available on the free
+tier at all.)
+
+1. Create a free key at <https://build.nvidia.com/settings/api-keys>.
+2. In `config.json`, set:
+   ```json
+   "provider": "nvidia",
+   "nvidia_api_key": "nvapi-…",
+   "nvidia_model": "openai/gpt-oss-120b"
+   ```
+3. Restart Jarvis.
+
+**Trade-off to know about:** this path has no vision support, so "what's on my screen" won't work
+while `provider` is `nvidia` - the screenshot tool is simply left out in that mode. Everything else
+(notes, calendars, run_command, run_claude_code, memory, Slack) works the same. Set `provider`
+back to `"anthropic"` any time to restore the default brain and screen vision.
 
 ## 📅 Google Calendar setup (optional)
 

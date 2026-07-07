@@ -45,6 +45,9 @@ DEFAULT_CONFIG = {
     "slack_bot_token": "",
     "slack_app_token": "",
     "outlook_client_id": "",
+    "provider": "anthropic",
+    "nvidia_api_key": "",
+    "nvidia_model": "openai/gpt-oss-120b",
 }
 
 if not CONFIG_PATH.exists():
@@ -345,6 +348,12 @@ Long-term memory:
 
 
 def think(user_text):
+    if CFG.get("provider") == "nvidia":
+        return think_nvidia(user_text)
+    return think_anthropic(user_text)
+
+
+def think_anthropic(user_text):
     import anthropic
     client = anthropic.Anthropic(api_key=API_KEY)
     HISTORY.append({"role": "user", "content": user_text})
@@ -370,6 +379,42 @@ def think(user_text):
                     content = str(out)
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": content})
         local.append({"role": "user", "content": results})
+    return "I got lost in my own tools. Embarrassing. Could you repeat that?"
+
+
+# Free alternative brain: any OpenAI-compatible endpoint (tested with NVIDIA's
+# hosted NIM API, model openai/gpt-oss-120b - fast and reliable at tool use).
+# No vision support, so the screenshot tool is left out of this path.
+NVIDIA_TOOL_DEFS = [
+    {"type": "function", "function": {
+        "name": t["name"], "description": t["description"], "parameters": t["input_schema"]}}
+    for t in TOOL_DEFS if t["name"] != "screenshot"
+]
+
+
+def think_nvidia(user_text):
+    from openai import OpenAI
+    client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=CFG["nvidia_api_key"])
+    HISTORY.append({"role": "user", "content": user_text})
+    del HISTORY[:-24]
+    local = [{"role": "system", "content": system_prompt()}] + list(HISTORY)
+    for _ in range(10):
+        resp = client.chat.completions.create(
+            model=CFG["nvidia_model"], max_tokens=500,
+            tools=NVIDIA_TOOL_DEFS, tool_choice="auto", messages=local)
+        msg = resp.choices[0].message
+        if not msg.tool_calls:
+            text = (msg.content or "...").strip()
+            HISTORY.append({"role": "assistant", "content": text})
+            return text
+        local.append({"role": "assistant", "content": msg.content, "tool_calls": [
+            {"id": tc.id, "type": "function",
+             "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+            for tc in msg.tool_calls]})
+        for tc in msg.tool_calls:
+            args = json.loads(tc.function.arguments or "{}")
+            out = TOOL_FNS[tc.function.name](args)
+            local.append({"role": "tool", "tool_call_id": tc.id, "content": str(out)})
     return "I got lost in my own tools. Embarrassing. Could you repeat that?"
 
 
