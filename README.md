@@ -88,6 +88,24 @@ To quit Jarvis, either:
 - **Hold the orb down for about a second** - it dims and closes, no window-hunting needed, or
 - Double-click **`Stop-Jarvis.command`** (Mac) / **`stop-jarvis.bat`** (Windows) in `desktop/`.
 
+### Auto-start at login (optional, Mac)
+
+Voice/clap wake-up only works while Jarvis is already running - it can't hear "Hey Jarvis" before
+it's open. The fix is to have it start itself automatically every time you log into the Mac, so
+you never touch the launcher file again:
+
+```bash
+cd desktop
+./install-autostart.sh
+```
+
+This installs a macOS LaunchAgent (`~/Library/LaunchAgents/com.jarvis.assistant.plist`) that runs
+Jarvis at every login. It's safe to run even while Jarvis is already open - the duplicate-instance
+guard makes it a no-op instead of opening a second copy. To undo: `./uninstall-autostart.sh`.
+
+(Windows equivalent: put a shortcut to `start-jarvis-desktop.bat` in your Startup folder -
+Win+R, type `shell:startup`, drop the shortcut there.)
+
 ## ⚙️ config.json reference
 
 ```json
@@ -105,7 +123,10 @@ To quit Jarvis, either:
   "outlook_client_id": "",
   "provider": "anthropic",
   "nvidia_api_key": "",
-  "nvidia_model": "openai/gpt-oss-120b"
+  "nvidia_model": "openai/gpt-oss-120b",
+  "shortcuts": {
+    "site pricing sheet": "https://docs.google.com/spreadsheets/d/…"
+  }
 }
 ```
 
@@ -115,6 +136,9 @@ To quit Jarvis, either:
 - `notes_dir`: your markdown notes folder; leave `""` to disable notes search
 - `user_title`: how the butler addresses you (`sir`, `senhora`, …)
 - `orb_x` / `orb_y`: remembers where you last dragged the orb to rest; leave `null` for bottom-right
+- `shortcuts`: name → URL pairs. Say "open [name]" and Jarvis opens that exact link - no guessing,
+  it always uses the URL you configured. Great for spreadsheets, dashboards, or sites you open
+  often. Add as many as you like.
 
 ### The orb's behavior
 
