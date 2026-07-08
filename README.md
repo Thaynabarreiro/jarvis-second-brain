@@ -33,7 +33,13 @@ Two versions live in this repo:
   - `read_calendar` — reads today's (or the next N days') events from the Mac Calendar app
   - `read_google_calendar` — same, from Google Calendar, once you link it (see below)
   - `read_outlook_calendar` — same, from Outlook/Microsoft 365 Calendar, once you link it (see below)
+  - `create_calendar_event` — actually schedules something ("Jarvis, book a client call tomorrow
+    at 2pm") on the Mac Calendar and, if linked with write access, Google Calendar too
+  - `read_metodo_momento` — searches the Move AI agency's lead-gen spreadsheets (pipeline status,
+    outreach messages) for a company, lead ID, or status keyword
 - Optional **Slack bridge** — DM or @mention Jarvis on Slack for the same brain, no voice needed
+- **Conversation memory** — remembers the last ~24 turns across a restart (as long as it's within
+  3 hours; older gets treated as a fresh session instead of confusing stale context)
 
 Wake it three ways: say **"Hey Jarvis"**, **clap twice**, or **click the orb**.
 Speak over it ("Hey Jarvis…") to interrupt mid-sentence. After he answers, he keeps listening
@@ -113,15 +119,17 @@ auto-restart for the standby listener). Safe to run while Jarvis is already open
 duplicate-instance guard makes it a no-op instead of opening a second copy. To undo:
 `./uninstall-autostart.sh`.
 
-**Windows:** put shortcuts to both `start-jarvis-desktop.bat` and `start-wake-sentinel.bat` in
-your Startup folder (Win+R → type `shell:startup` → drop both shortcuts there). Both start at
-login. Note: unlike the Mac version, the Windows sentinel doesn't auto-restart itself after
-handing off to the full app - the first "quit fully, then say Hey Jarvis" after each login works,
-but after that, use `start-jarvis-desktop.bat` again to reopen it. A more complete Windows
-auto-restart (Task Scheduler) is a reasonable next step if this matters enough to you.
-
-(Windows equivalent: put a shortcut to `start-jarvis-desktop.bat` in your Startup folder -
-Win+R, type `shell:startup`, drop the shortcut there.)
+**Windows:**
+```bat
+cd desktop
+install-autostart.bat
+```
+Registers three Task Scheduler tasks: Jarvis at logon, the sentinel at logon, and a watchdog that
+checks every minute that the sentinel is still alive and restarts it if not (Task Scheduler's
+equivalent of the Mac's LaunchAgent KeepAlive). This mirrors the Mac behavior but **could not be
+tested on a real Windows machine** - if "Hey Jarvis" doesn't revive the app after a full quit,
+open Task Scheduler and check the three "Jarvis…" tasks for errors, or just fall back to
+double-clicking `start-jarvis-desktop.bat`. To undo: `uninstall-autostart.bat`.
 
 ## ⚙️ config.json reference
 
@@ -188,6 +196,11 @@ itself and shrinks back to the small standby orb when done.
 - "Hey Jarvis — what's on my calendar today?"
 - "Hey Jarvis, can you answer me in English from now on?" / "Hey Jarvis, réponds-moi en français."
 - "Hey Jarvis, give me my daily overview." / triple-click the orb — opens the full HUD briefing
+- "Hey Jarvis, book a client call tomorrow at 2pm." — creates a real calendar event
+- "Hey Jarvis, what's the status of the lead J. Silva Eletricista?" — reads the Método Momento sheets
+
+The daily briefing also greets you automatically the first time Jarvis is alive on a new day - no
+need to ask for it every morning; ask any time after that for an update.
 
 ---
 
@@ -236,6 +249,11 @@ Calendar (e.g. a work calendar not synced to Mac Calendar):
    ```
    Your browser opens, you log in and click Allow. Done — the token is cached and refreshes
    itself; you won't need to repeat this unless you revoke access.
+
+This now requests read **and create** access (needed for `create_calendar_event` to also write to
+Google Calendar, not just Mac Calendar). If you linked Google Calendar before this was added,
+**delete `~/.jarvis/google_token.json`** and re-run step 4 once to re-grant with the new scope -
+otherwise event creation silently only reaches the Mac Calendar.
 
 ## 📆 Outlook Calendar setup (optional)
 

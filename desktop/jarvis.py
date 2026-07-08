@@ -164,6 +164,128 @@ def tool_remember(args):
     return "remembered"
 
 
+# Método Momento (Move AI agency) lead-gen sheets - same spreadsheet already
+# powering the HUD's outreach card. gid=leads is the pipeline (one row per
+# lead), gid=messages is the outreach log (one row per message sent).
+METODO_MOMENTO_SHEET_ID = "1eC2im7e5U3IvJmBm783t0X-xAXi8RSmqowY-41sfDmM"
+METODO_MOMENTO_LEADS_GID = "1547340779"
+METODO_MOMENTO_MSGS_GID = "325599469"
+
+
+def _fetch_csv_rows(sheet_id, gid):
+    import csv
+    import requests
+    r = requests.get(f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}",
+                     timeout=10)
+    r.raise_for_status()
+    reader = csv.reader(r.text.splitlines())
+    header = next(reader, [])
+    return header, list(reader)
+
+
+def tool_read_metodo_momento(args):
+    """Searches the Método Momento leads pipeline and outreach message log
+    for a keyword (company name, status like 'call marcada', a lead ID,
+    etc.) and returns matching rows - for questions like 'what's the status
+    of lead X' or 'how many leads are in negotiation', not just yesterday's
+    fixed stats already shown on the home screen."""
+    query = args.get("query", "").strip().lower()
+    try:
+        results = []
+        lead_header, lead_rows = _fetch_csv_rows(METODO_MOMENTO_SHEET_ID, METODO_MOMENTO_LEADS_GID)
+        for row in lead_rows:
+            if not query or any(query in (cell or "").lower() for cell in row):
+                results.append("LEAD: " + " | ".join(f"{h}: {c}" for h, c in zip(lead_header, row) if c))
+            if len(results) >= 15:
+                break
+        if query:
+            msg_header, msg_rows = _fetch_csv_rows(METODO_MOMENTO_SHEET_ID, METODO_MOMENTO_MSGS_GID)
+            added = 0
+            for row in msg_rows:
+                if any(query in (cell or "").lower() for cell in row):
+                    results.append("MENSAGEM: " + " | ".join(f"{h}: {c}" for h, c in zip(msg_header, row) if c))
+                    added += 1
+                if added >= 10:
+                    break
+        return "\n\n".join(results)[:6000] or "(nothing matched in the Método Momento sheets)"
+    except Exception as e:  # noqa: BLE001
+        return f"(error reading Método Momento sheets: {e})"
+
+
+CREATE_EVENT_SCRIPT = """
+on run {evTitle, y, mo, d, h, mi, durMin}
+    set startD to current date
+    set year of startD to (y as integer)
+    set month of startD to (mo as integer)
+    set day of startD to (d as integer)
+    set hours of startD to (h as integer)
+    set minutes of startD to (mi as integer)
+    set seconds of startD to 0
+    set endD to startD + ((durMin as integer) * minutes)
+    tell application "Calendar"
+        tell (first calendar whose writable is true)
+            make new event with properties {summary:evTitle, start date:startD, end date:endD}
+        end tell
+    end tell
+    return "ok"
+end run
+"""
+
+
+def _create_google_event(title, start_dt, end_dt):
+    if not GOOGLE_TOKEN_PATH.exists():
+        return False
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+        creds = Credentials.from_authorized_user_info(
+            json.loads(GOOGLE_TOKEN_PATH.read_text()),
+            ["https://www.googleapis.com/auth/calendar"])
+        if not creds.valid and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            GOOGLE_TOKEN_PATH.write_text(creds.to_json())
+        service = build("calendar", "v3", credentials=creds)
+        service.events().insert(calendarId="primary", body={
+            "summary": title,
+            "start": {"dateTime": start_dt.isoformat()},
+            "end": {"dateTime": end_dt.isoformat()},
+        }).execute()
+        return True
+    except Exception as e:  # noqa: BLE001
+        print("Google event creation skipped/failed:", e)
+        return False
+
+
+def tool_create_calendar_event(args):
+    try:
+        y, mo, d = (int(x) for x in args["date"].split("-"))
+        h, mi = (int(x) for x in args["time"].split(":"))
+        dur = int(args.get("duration_minutes", 60))
+        title = args["title"]
+    except (KeyError, ValueError) as e:
+        return f"(bad arguments: {e})"
+
+    start_dt = datetime(y, mo, d, h, mi)
+    end_dt = start_dt + timedelta(minutes=dur)
+    made_mac, made_google = False, False
+
+    try:
+        r = subprocess.run(["osascript", "-e", CREATE_EVENT_SCRIPT, title,
+                           str(y), str(mo), str(d), str(h), str(mi), str(dur)],
+                           capture_output=True, text=True, timeout=15)
+        made_mac = r.returncode == 0 and "ok" in r.stdout
+    except Exception as e:  # noqa: BLE001
+        print("Mac event creation failed:", e)
+
+    made_google = _create_google_event(title, start_dt, end_dt)
+
+    if made_mac or made_google:
+        where = " and ".join(w for w, ok in [("Mac Calendar", made_mac), ("Google Calendar", made_google)] if ok)
+        return f"Created '{title}' on {args['date']} at {args['time']} in: {where}."
+    return "(couldn't create the event on either calendar - check Calendar automation permission)"
+
+
 CALENDAR_SCRIPT = """
 on run {daysAhead}
     set startD to current date
@@ -173,12 +295,10 @@ on run {daysAhead}
     tell application "Calendar"
         repeat with cal in calendars
             try
-                if writable of cal is true then
-                    set evts to (every event of cal whose start date >= startD and start date < endD)
-                    repeat with e in evts
-                        set out to out & (name of cal) & ": " & (summary of e) & " -- " & (start date of e as string) & linefeed
-                    end repeat
-                end if
+                set evts to (every event of cal whose start date >= startD and start date < endD)
+                repeat with e in evts
+                    set out to out & (name of cal) & ": " & (summary of e) & " -- " & (start date of e as string) & linefeed
+                end repeat
             end try
         end repeat
     end tell
@@ -203,7 +323,7 @@ def tool_read_calendar(args):
         return f"(error: {e})"
 
 
-GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar"]  # read + create events
 GOOGLE_CREDS_PATH = JARVIS_HOME / "google_credentials.json"
 GOOGLE_TOKEN_PATH = JARVIS_HOME / "google_token.json"
 
@@ -328,17 +448,48 @@ TOOL_DEFS = [
      "description": "Read events from the user's Outlook/Microsoft 365 Calendar for the next N days (default 1 = today). Use alongside the other calendar tools if asked generally about 'my calendar/agenda'.",
      "input_schema": {"type": "object", "properties": {
          "days_ahead": {"type": "integer", "description": "How many days ahead to look, 1-14"}}}},
+    {"name": "create_calendar_event",
+     "description": "Creates a real event on the Mac Calendar (and Google Calendar if linked) - use whenever asked to schedule, book, or mark something on the calendar.",
+     "input_schema": {"type": "object", "properties": {
+         "title": {"type": "string"},
+         "date": {"type": "string", "description": "ISO date, e.g. 2026-07-09"},
+         "time": {"type": "string", "description": "24h HH:MM, e.g. 14:30"},
+         "duration_minutes": {"type": "integer", "description": "default 60"}},
+         "required": ["title", "date", "time"]}},
+    {"name": "read_metodo_momento",
+     "description": "Searches the Método Momento (Move AI agency) lead-gen spreadsheets: the leads pipeline and the outreach message log. Use for questions about a specific lead/company, campaign status, or counts beyond the fixed 'yesterday' stats already on the home screen.",
+     "input_schema": {"type": "object", "properties": {
+         "query": {"type": "string", "description": "Company name, lead ID, status keyword, etc. Empty returns a recent sample."}}}},
 ]
 TOOL_FNS = {"run_command": tool_run_command, "screenshot": tool_screenshot,
             "run_claude_code": tool_run_claude_code,
             "search_notes": tool_search_notes, "remember": tool_remember,
             "read_calendar": tool_read_calendar,
             "read_google_calendar": tool_read_google_calendar,
-            "read_outlook_calendar": tool_read_outlook_calendar}
+            "read_outlook_calendar": tool_read_outlook_calendar,
+            "create_calendar_event": tool_create_calendar_event,
+            "read_metodo_momento": tool_read_metodo_momento}
 
 
 # ---------------------------------------------------------------- brain
+HISTORY_PATH = JARVIS_HOME / "conversation.json"
 HISTORY = []
+try:
+    # only resume if the last conversation was recent - carrying forward a
+    # 3-day-old exchange as "context" would just confuse a fresh session
+    if time.time() - HISTORY_PATH.stat().st_mtime < 3 * 3600:
+        HISTORY = json.loads(HISTORY_PATH.read_text())[-24:]
+except (FileNotFoundError, json.JSONDecodeError, OSError):
+    pass
+
+
+def _save_history():
+    try:
+        HISTORY_PATH.write_text(json.dumps(HISTORY[-24:], ensure_ascii=False))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 _last_lang = None
 LANG_TAG_RE = re.compile(r"\s*\[LANG:(pt|en|fr)\]\s*$", re.I)
 
@@ -397,6 +548,7 @@ def think_anthropic(user_text):
             text = "".join(b.text for b in resp.content if b.type == "text").strip()
             text, _last_lang = extract_lang_tag(text or "...")
             HISTORY.append({"role": "assistant", "content": text or "..."})
+            _save_history()
             return text or "..."
         local.append({"role": "assistant", "content": resp.content})
         results = []
@@ -466,6 +618,7 @@ def think_nvidia(user_text):
             text = (msg.content or "...").strip()
             text, _last_lang = extract_lang_tag(text)
             HISTORY.append({"role": "assistant", "content": text})
+            _save_history()
             return text
         local.append({"role": "assistant", "content": msg.content, "tool_calls": [
             {"id": tc.id, "type": "function",
@@ -1172,6 +1325,27 @@ def run_daily_briefing():
         set_state("idle")
 
 
+LAST_BRIEFING_PATH = JARVIS_HOME / "last_briefing_date.txt"
+
+
+def proactive_briefing_watcher():
+    """Greets the user with the daily briefing automatically the first time
+    Jarvis is alive on a new day - so mornings don't require asking for it.
+    Waits for the background data cache's first refresh so the numbers are
+    real, not empty placeholders."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        if LAST_BRIEFING_PATH.read_text().strip() == today:
+            return  # already greeted today
+    except FileNotFoundError:
+        pass
+    while CACHED_HOME_DATA["last_refreshed"] == 0:
+        time.sleep(1)
+    time.sleep(2)
+    run_daily_briefing()
+    LAST_BRIEFING_PATH.write_text(today)
+
+
 def orb_position_loop(win):
     """Rests bottom-right (or wherever the user last dragged it to) as a
     small orb when idle, and glides to screen-center - still a small orb -
@@ -1265,6 +1439,7 @@ def main():
 
     threading.Thread(target=audio_loop, daemon=True).start()
     threading.Thread(target=home_data_refresher_loop, daemon=True).start()
+    threading.Thread(target=proactive_briefing_watcher, daemon=True).start()
 
     if CFG.get("slack_bot_token") and CFG.get("slack_app_token"):
         import slack_bridge

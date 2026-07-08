@@ -20,7 +20,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 JARVIS_HOME = Path.home() / ".jarvis"
 CREDS_PATH = JARVIS_HOME / "google_credentials.json"
 TOKEN_PATH = JARVIS_HOME / "google_token.json"
-SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/calendar"]  # read + create events
 
 
 def main():
