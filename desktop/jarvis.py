@@ -172,10 +172,14 @@ on run {daysAhead}
     set out to ""
     tell application "Calendar"
         repeat with cal in calendars
-            set evts to (every event of cal whose start date >= startD and start date < endD)
-            repeat with e in evts
-                set out to out & (summary of e) & " -- " & (start date of e as string) & linefeed
-            end repeat
+            try
+                if writable of cal is true then
+                    set evts to (every event of cal whose start date >= startD and start date < endD)
+                    repeat with e in evts
+                        set out to out & (name of cal) & ": " & (summary of e) & " -- " & (start date of e as string) & linefeed
+                    end repeat
+                end if
+            end try
         end repeat
     end tell
     return out
@@ -186,7 +190,6 @@ end run
 def tool_read_calendar(args):
     days = max(1, min(int(args.get("days_ahead", 1)), 14))
     try:
-        subprocess.run(["open", "-a", "Calendar"], capture_output=True, timeout=5)
         r = subprocess.run(["osascript", "-e", CALENDAR_SCRIPT, str(days)],
                            capture_output=True, text=True, timeout=20)
         if r.returncode != 0:
@@ -638,6 +641,41 @@ def process_utterance(whisper, audio):
         set_state("idle")
         return
     print(f"🎙 {text}")
+    
+    switch_paid = re.compile(r"\b(mudar|trocar|use|usar|ative|ativar|coloque|colocar)\s+(para\s+o\s+)?(modelo\s+)?(pago|claude|paid)\b", re.I)
+    switch_free = re.compile(r"\b(mudar|trocar|use|usar|ative|ativar|coloque|colocar)\s+(para\s+o\s+)?(modelo\s+)?(gratis|grátis|gratuito|free|nvidia)\b", re.I)
+    close_home = re.compile(r"\b(fechar\s+(a\s+)?home|minimizar\s+(a\s+)?home|fechar\s+tela|minimizar\s+tela|fechar|minimizar|close\s+home|minimize\s+home)\b", re.I)
+    
+    if switch_paid.search(text):
+        CFG["provider"] = "anthropic"
+        try:
+            on_disk = json.loads(CONFIG_PATH.read_text())
+            on_disk["provider"] = "anthropic"
+            CONFIG_PATH.write_text(json.dumps(on_disk, indent=2, ensure_ascii=False))
+        except Exception:
+            pass
+        speak("Modelo pago Claude ativado, senhora. [LANG:pt]")
+        followup_until = time.time() + FOLLOWUP_WINDOW
+        return
+
+    if switch_free.search(text):
+        CFG["provider"] = "nvidia"
+        try:
+            on_disk = json.loads(CONFIG_PATH.read_text())
+            on_disk["provider"] = "nvidia"
+            CONFIG_PATH.write_text(json.dumps(on_disk, indent=2, ensure_ascii=False))
+        except Exception:
+            pass
+        speak("Modelo gratuito ativado, senhora. [LANG:pt]")
+        followup_until = time.time() + FOLLOWUP_WINDOW
+        return
+
+    if close_home.search(text):
+        HOME_MODE["active"] = False
+        speak("Fechando a tela, senhora. [LANG:pt]")
+        followup_until = time.time() + FOLLOWUP_WINDOW
+        return
+
     if BRIEFING_TRIGGERS.search(text):
         run_daily_briefing()
         followup_until = time.time() + FOLLOWUP_WINDOW
@@ -739,8 +777,10 @@ class OrbApi:
             "date": f"{weekday_pt}, {now.day} de {month_pt}" if CFG["language"] == "pt"
                     else now.strftime("%A, %B %-d"),
             "greeting": f"{greet_word}, {CFG.get('user_name') or CFG['user_title']}.",
-            "agenda": _parse_agenda(),
-            "weather": fetch_weather(),
+            "agenda": CACHED_HOME_DATA["agenda"],
+            "weather": CACHED_HOME_DATA["weather"],
+            "birthdays": CACHED_HOME_DATA["birthdays"],
+            "outreach": CACHED_HOME_DATA["outreach"],
             "topic": HOME_MODE["topic"],
             "state": STATE,
         }
@@ -749,6 +789,10 @@ class OrbApi:
         if HOME_MODE["active"]:
             return "already_active"
         threading.Thread(target=run_daily_briefing, daemon=True).start()
+        return "ok"
+
+    def close_home(self):
+        HOME_MODE["active"] = False
         return "ok"
 
 
@@ -760,9 +804,32 @@ def _parse_agenda():
     for line in raw.splitlines():
         if " -- " not in line:
             continue
-        title, when = line.split(" -- ", 1)
+        summary_part, when = line.split(" -- ", 1)
+        if ": " in summary_part:
+            cal_name, summary = summary_part.split(": ", 1)
+        else:
+            summary = summary_part
+        summary = summary.strip()
+        # Skip birthday events from the regular agenda list
+        if any(kw in summary.lower() for kw in ["faz ", "niver", "nasc", "aniv", "birth"]):
+            continue
         m = re.search(r"(\d{1,2}:\d{2})", when)
-        items.append({"time": m.group(1) if m else "", "title": title.strip()})
+        items.append({"time": m.group(1) if m else "", "title": summary})
+
+    # merge today's Google Calendar events too (if linked), deduplicated
+    graw = tool_read_google_calendar({"days_ahead": 1})
+    if not graw.startswith(("BLOCKED", "(")):
+        seen = {(i["time"], i["title"].lower()) for i in items}
+        for line in graw.splitlines():
+            if " -- " not in line:
+                continue
+            title, when = line.split(" -- ", 1)
+            title = title.strip()
+            m = re.search(r"T(\d{2}:\d{2})", when) or re.search(r"(\d{1,2}:\d{2})", when)
+            t = m.group(1) if m else ""
+            if (t, title.lower()) not in seen:
+                items.append({"time": t, "title": title})
+
     return sorted(items, key=lambda e: e["time"])[:6]
 
 
@@ -812,6 +879,187 @@ def fetch_weather():
         return _weather_cache["data"]
 
 
+# ---------------------------------------------------------------- background cache
+
+CACHED_HOME_DATA = {
+    "agenda": [],
+    "weather": None,
+    "birthdays": [],
+    "outreach": {
+        "felipe_sent": 0,
+        "thayna_sent": 0,
+        "positives": 0,
+        "negatives": 0,
+        "followups": 0
+    },
+    "last_refreshed": 0
+}
+
+
+def fetch_yesterday_outreach_stats():
+    import csv
+    import requests
+    sheet_id = "1eC2im7e5U3IvJmBm783t0X-xAXi8RSmqowY-41sfDmM"
+    leads_gid = "1547340779"
+    msg_gid = "325599469"
+    
+    yesterday = datetime.now() - timedelta(days=1)
+    y_str_1 = yesterday.strftime("%d/%m/%Y")
+    y_str_2 = yesterday.strftime("%Y-%m-%d")
+    y_str_1_alt = f"{yesterday.day}/{yesterday.month}/{yesterday.year}"
+    
+    target_dates = {y_str_1, y_str_2, y_str_1_alt}
+    
+    felipe_sent = 0
+    thayna_sent = 0
+    positives = 0
+    negatives = 0
+    followups = 0
+    
+    try:
+        r_msg = requests.get(f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={msg_gid}", timeout=8)
+        if r_msg.status_code == 200:
+            lines = r_msg.text.splitlines()
+            reader = csv.reader(lines)
+            next(reader, None)
+            for row in reader:
+                if len(row) > 5 and row[5]:
+                    row_date = row[5].split()[0]
+                    if row_date in target_dates:
+                        status = row[3].lower() if len(row) > 3 else ""
+                        msg_text = row[4] if len(row) > 4 else ""
+                        if "enviado" in status or "sucesso" in status:
+                            if "felipe" in msg_text.lower() or "hi " in msg_text.lower() or "hello " in msg_text.lower():
+                                felipe_sent += 1
+                            elif "thayna" in msg_text.lower() or "thayná" in msg_text.lower() or "olá " in msg_text.lower():
+                                thayna_sent += 1
+                        if any(kw in msg_text.lower() for kw in ["follow", "feedback", "conseguiu", "olhada", "relembrar"]):
+                            followups += 1
+                            
+        r_leads = requests.get(f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={leads_gid}", timeout=8)
+        if r_leads.status_code == 200:
+            lines = r_leads.text.splitlines()
+            reader = csv.reader(lines)
+            next(reader, None)
+            for row in reader:
+                if len(row) > 1 and row[1]:
+                    row_date = row[1].strip()
+                    if row_date in target_dates:
+                        gestao = row[13].strip() if len(row) > 13 else ""
+                        notas = row[14].strip() if len(row) > 14 else ""
+                        if any(kw in gestao.lower() for kw in ["conversa", "call marcada"]):
+                            positives += 1
+                        elif any(kw in gestao.lower() for kw in ["nurture", "reprovado"]):
+                            negatives += 1
+                        elif any(kw in notas.lower() for kw in ["não tem interesse", "sem interesse", "recusou", "rejeitou"]):
+                            negatives += 1
+    except Exception as e:
+        print("[Cache] Outreach stats refresh failed:", e)
+        
+    return {
+        "felipe_sent": felipe_sent,
+        "thayna_sent": thayna_sent,
+        "positives": positives,
+        "negatives": negatives,
+        "followups": followups
+    }
+
+
+def fetch_birthdays_of_the_week():
+    birthdays = []
+    try:
+        raw = tool_read_calendar({"days_ahead": 7})
+        if raw and not raw.startswith(("BLOCKED", "(")):
+            for line in raw.splitlines():
+                if " -- " not in line:
+                    continue
+                parts = line.split(" -- ", 1)
+                summary_part = parts[0]
+                when_part = parts[1]
+                
+                if ": " in summary_part:
+                    cal_name, summary = summary_part.split(": ", 1)
+                else:
+                    summary = summary_part
+                    
+                summary = summary.strip()
+                if any(kw in summary.lower() for kw in ["faz ", "niver", "nasc", "aniv", "birth"]):
+                    name = summary.replace("Aniversário de", "").replace("Aniversário", "").replace("'s Birthday", "").replace("Birthday", "").strip()
+                    clean_name = re.sub(r"\s+faz\s+\d+\s+anos.*", "", name, flags=re.I)
+                    clean_name = re.sub(r"niver\s+", "", clean_name, flags=re.I)
+                    
+                    date_match = re.search(r"(\d{1,2}\s+de\s+[a-zA-Zç]+)", when_part, re.I)
+                    bdate = date_match.group(1) if date_match else "Esta semana"
+                    birthdays.append({"name": clean_name, "date": bdate})
+    except Exception as e:
+        print("Local birthday extraction failed:", e)
+        
+    if GOOGLE_TOKEN_PATH.exists():
+        try:
+            from google.auth.transport.requests import Request
+            from google.oauth2.credentials import Credentials
+            from googleapiclient.discovery import build
+            creds = Credentials.from_authorized_user_info(
+                json.loads(GOOGLE_TOKEN_PATH.read_text()), GOOGLE_SCOPES)
+            if not creds.valid and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                GOOGLE_TOKEN_PATH.write_text(creds.to_json())
+            service = build("calendar", "v3", credentials=creds)
+            now = datetime.now()
+            time_min = now.replace(hour=0, minute=0, second=0).isoformat() + "Z"
+            time_max = (now.replace(hour=0, minute=0, second=0) + timedelta(days=7)).isoformat() + "Z"
+            events = service.events().list(
+                calendarId="primary", timeMin=time_min, timeMax=time_max,
+                singleEvents=True, orderBy="startTime").execute().get("items", [])
+            for e in events:
+                summary = e.get('summary', '')
+                if any(kw in summary.lower() for kw in ["aniversário", "birthday", "niver", "nascimento", "bday", "faz "]):
+                    start = e['start'].get('dateTime', e['start'].get('date'))
+                    name = summary.replace("Aniversário de", "").replace("Aniversário", "").replace("'s Birthday", "").replace("Birthday", "").strip()
+                    clean_name = re.sub(r"\s+faz\s+\d+\s+anos.*", "", name, flags=re.I)
+                    clean_name = re.sub(r"niver\s+", "", clean_name, flags=re.I)
+                    bdate = "Esta semana"
+                    try:
+                        dt = datetime.strptime(start.split('T')[0], "%Y-%m-%d")
+                        month_pt = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho",
+                                    "agosto", "setembro", "outubro", "novembro", "dezembro"][dt.month - 1]
+                        bdate = f"{dt.day} de {month_pt}"
+                    except Exception:
+                        pass
+                    birthdays.append({"name": clean_name, "date": bdate})
+        except Exception:
+            pass
+            
+    seen = set()
+    unique_birthdays = []
+    for b in birthdays:
+        if b["name"] not in seen:
+            seen.add(b["name"])
+            unique_birthdays.append(b)
+    return unique_birthdays
+
+
+def home_data_refresher_loop():
+    global CACHED_HOME_DATA
+    while True:
+        try:
+            print("[CacheRefresher] Refreshing background home data...")
+            weather = fetch_weather()
+            agenda = _parse_agenda()
+            outreach = fetch_yesterday_outreach_stats()
+            birthdays = fetch_birthdays_of_the_week()
+            
+            CACHED_HOME_DATA["weather"] = weather
+            CACHED_HOME_DATA["agenda"] = agenda
+            CACHED_HOME_DATA["outreach"] = outreach
+            CACHED_HOME_DATA["birthdays"] = birthdays
+            CACHED_HOME_DATA["last_refreshed"] = time.time()
+            print("[CacheRefresher] Refresh completed successfully.")
+        except Exception as e:
+            print("[CacheRefresher] Error in refresh loop:", e)
+        time.sleep(120)
+
+
 def _default_home(win):
     screen = webview.screens[0] if webview.screens else None
     sw, sh = (screen.width, screen.height) if screen else (1440, 900)
@@ -819,6 +1067,7 @@ def _default_home(win):
 
 
 HOME_MODE = {"active": False, "topic": None}
+BRIEFING_RUNNING = False
 BRIEFING_TRIGGERS = re.compile(
     r"\b(abr[ae]\s+(a\s+)?(sua\s+)?home|resumo\s+do\s+dia|vis[aã]o\s+geral|"
     r"atualiza[cç][oõ]es\s+do\s+dia|panorama\s+do\s+dia|"
@@ -829,10 +1078,13 @@ def run_daily_briefing():
     """A scripted, deterministic morning-briefing sequence (not left to the
     LLM to improvise) - real name, real time, real weather, real agenda -
     while the fullscreen HUD highlights whichever panel is being narrated."""
-    if HOME_MODE["active"]:
+    global BRIEFING_RUNNING
+    if BRIEFING_RUNNING:
         return
+    BRIEFING_RUNNING = True
     HOME_MODE["active"] = True
     HOME_MODE["topic"] = None
+    set_state("speaking")
     try:
         name = CFG.get("user_name") or CFG["user_title"]
         now = datetime.now()
@@ -844,13 +1096,13 @@ def run_daily_briefing():
         greeting_text = f"{greet}, {name}. " + (f"São {now.strftime('%H:%M')} agora." if pt
                         else f"It's {now.strftime('%H:%M')} right now.")
 
-        weather = fetch_weather()
+        weather = CACHED_HOME_DATA["weather"]
         weather_text = None
         if weather:
             weather_text = (f"Estão {weather['temp']} graus em {weather['city']}, {weather['desc']}." if pt
                             else f"It's {weather['temp']} degrees in {weather['city']}, {weather['desc']}.")
 
-        agenda = _parse_agenda()
+        agenda = CACHED_HOME_DATA["agenda"]
         if agenda:
             preview = "; ".join(f"{a['title']} às {a['time']}" if pt else f"{a['title']} at {a['time']}"
                                 for a in agenda[:3] if a["time"])
@@ -860,18 +1112,64 @@ def run_daily_briefing():
         else:
             agenda_text = "Nada agendado para hoje — dia livre." if pt else "Nothing on the calendar today - a clear day."
 
+        # Outreach narration
+        outreach = CACHED_HOME_DATA["outreach"]
+        outreach_text = None
+        if outreach:
+            total_sent = outreach["felipe_sent"] + outreach["thayna_sent"]
+            if total_sent > 0:
+                outreach_text = (f"Ontem na automação de sites, enviamos {total_sent} mensagens no total. "
+                                 f"O Felipe enviou {outreach['felipe_sent']} e a Thayná enviou {outreach['thayna_sent']}. "
+                                 if pt else
+                                 f"Yesterday in site automation, we sent {total_sent} messages in total. "
+                                 f"Felipe sent {outreach['felipe_sent']} and Thayna sent {outreach['thayna_sent']}. ")
+                if outreach["positives"] > 0:
+                    outreach_text += (f"Tivemos {outreach['positives']} resposta{'s' if outreach['positives'] != 1 else ''} positiva{'s' if outreach['positives'] != 1 else ''}."
+                                     if pt else
+                                     f"We had {outreach['positives']} positive reply/replies.")
+                else:
+                    outreach_text += ("Nenhuma resposta positiva." if pt else "No positive replies.")
+            else:
+                outreach_text = ("Nenhuma mensagem de automação ontem." if pt else "No automation messages yesterday.")
+
         close_text = "Esse é o resumo do seu dia. Diga se precisar de mais alguma coisa." if pt \
             else "That's your day in a nutshell. Say the word if you need anything else."
 
-        for topic, text in (("greeting", greeting_text), ("weather", weather_text),
-                            ("agenda", agenda_text), (None, close_text)):
+        import asyncio
+        import edge_tts
+        
+        # Local speak segment helper to prevent idle state flicker
+        def speak_segment(text, topic):
             if not text:
-                continue
+                return
             HOME_MODE["topic"] = topic
-            speak(text)
+            set_state("speaking", text)
+            
+            clean = re.sub(r"[*_#`\[\]]", "", text)
+            path = JARVIS_HOME / "reply.mp3"
+            voice = {"en": CFG.get("voice_en"), "fr": CFG.get("voice_fr")}.get(_last_lang) or CFG["voice"]
+            
+            async def gen():
+                await edge_tts.Communicate(clean, voice, rate="+8%").save(str(path))
+            try:
+                asyncio.run(gen())
+                data, sr = _decode_audio(path)
+                with _play_lock:
+                    sd.play(data, sr, latency="high")
+                sd.wait()
+            except Exception as e:
+                print("Briefing TTS segment failed:", e)
+
+        speak_segment(greeting_text, "greeting")
+        speak_segment(weather_text, "weather")
+        speak_segment(agenda_text, "agenda")
+        speak_segment(outreach_text, "outreach")
+        speak_segment(close_text, None)
+
     finally:
         HOME_MODE["topic"] = None
-        HOME_MODE["active"] = False
+        BRIEFING_RUNNING = False
+        set_state("idle")
 
 
 def orb_position_loop(win):
@@ -945,18 +1243,28 @@ def main():
         print(f"! Set your API key in {CONFIG_PATH} (api_key field) or export ANTHROPIC_API_KEY.")
         return
 
-    if PID_FILE.exists():
+    # Atomic lock: O_CREAT|O_EXCL means exactly one process can create the
+    # pidfile, even if two launch in the same instant (login autostart +
+    # sentinel + manual double-click all racing was how two orbs appeared).
+    while True:
         try:
-            old_pid = int(PID_FILE.read_text().strip())
-        except ValueError:
-            old_pid = None
-        if old_pid and pid_alive(old_pid):
-            print(f"Jarvis is already running (pid {old_pid}).")
-            print("Double-click Stop-Jarvis to quit it, or hold the orb for ~1s.")
-            return
-    PID_FILE.write_text(str(os.getpid()))
+            fd = os.open(PID_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            break
+        except FileExistsError:
+            try:
+                old_pid = int(PID_FILE.read_text().strip())
+            except (ValueError, OSError):
+                old_pid = None
+            if old_pid and pid_alive(old_pid):
+                print(f"Jarvis is already running (pid {old_pid}).")
+                print("Double-click Stop-Jarvis to quit it, or hold the orb for ~1s.")
+                return
+            PID_FILE.unlink(missing_ok=True)  # stale lock from a crash - reclaim
 
     threading.Thread(target=audio_loop, daemon=True).start()
+    threading.Thread(target=home_data_refresher_loop, daemon=True).start()
 
     if CFG.get("slack_bot_token") and CFG.get("slack_app_token"):
         import slack_bridge

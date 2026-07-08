@@ -56,41 +56,44 @@ def launch_jarvis():
                      start_new_session=(platform.system() != "Windows"))
 
 
+def listen_until_wake(oww):
+    """Holds one continuous mic session while Jarvis is down (reopening the
+    device every few seconds is what caused CoreAudio hangs before). Returns
+    True on a wake trigger, False if Jarvis came up some other way."""
+    clap_t, level = 0.0, 0.0
+    with sd.InputStream(samplerate=SR, channels=1, dtype="int16", blocksize=FRAME) as stream:
+        while True:
+            if jarvis_alive():
+                return False
+            frame, _ = stream.read(FRAME)
+            mono = frame[:, 0]
+            peak = np.abs(mono).max() / 32768.0
+            level = level * .97 + peak * .03
+            if peak > max(.35, level * 4):
+                now = time.time()
+                if .1 < now - clap_t < .8:
+                    return True
+                clap_t = now
+            elif oww.predict(mono)["hey_jarvis"] > .4:
+                return True
+
+
 def main():
     from openwakeword.model import Model
     oww = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
     print("(standby listener active - say 'Hey Jarvis' or clap twice to wake the full app)")
 
-    if jarvis_alive():
-        print("Jarvis is already running - standby listener stepping aside.")
-        return
-
-    clap_t, level = 0.0, 0.0
-    # One continuous mic session for as long as Jarvis is down - reopening the
-    # device every few seconds just to poll a file is what caused it to hang
-    # on some machines, so we check jarvis_alive() once per frame instead.
-    with sd.InputStream(samplerate=SR, channels=1, dtype="int16", blocksize=FRAME) as stream:
-        while True:
-            if jarvis_alive():
-                print("Jarvis is already running - standby listener stepping aside.")
-                return
-            frame, _ = stream.read(FRAME)
-            mono = frame[:, 0]
-            peak = np.abs(mono).max() / 32768.0
-            level = level * .97 + peak * .03
-            woke = False
-            if peak > max(.35, level * 4):
-                now = time.time()
-                if .1 < now - clap_t < .8:
-                    woke = True
-                else:
-                    clap_t = now
-            elif oww.predict(mono)["hey_jarvis"] > .4:
-                woke = True
-            if woke:
-                print("Wake trigger heard - launching Jarvis.")
-                launch_jarvis()
-                return
+    # One long-lived process: idle-poll (mic released) while Jarvis is up,
+    # listen (mic held) while it's down. Never exits, so launchd doesn't
+    # churn through restart cycles every few seconds.
+    while True:
+        if jarvis_alive():
+            time.sleep(5)
+            continue
+        if listen_until_wake(oww):
+            print("Wake trigger heard - launching Jarvis.")
+            launch_jarvis()
+            time.sleep(15)  # give the full app time to claim the pid lock
 
 
 if __name__ == "__main__":
