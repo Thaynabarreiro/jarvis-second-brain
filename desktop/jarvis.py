@@ -748,7 +748,7 @@ def audio_loop():
                     handle_interaction(stream, whisper, oww)
 
 
-def record_until_silence(stream, max_s=14, silence_s=.7, lead=None):
+def record_until_silence(stream, max_s=14, silence_s=1.1, lead=None):
     chunks = [lead] if lead is not None else []
     quiet, started = 0, lead is not None
     for _ in range(int(max_s * SR / FRAME)):
@@ -794,7 +794,16 @@ def process_utterance(whisper, audio):
         set_state("idle")
         return
     print(f"🎙 {text}")
-    
+
+    # Stop command: checked first and returns instantly with no reply at all -
+    # audio playback was already cut the moment the wake word was heard (the
+    # barge-in in audio_loop), so this just has to swallow the "stop" itself
+    # instead of answering it like a normal question.
+    if STOP_TRIGGERS.search(text):
+        interrupt_speech()
+        set_state("idle")
+        return
+
     switch_paid = re.compile(r"\b(mudar|trocar|use|usar|ative|ativar|coloque|colocar)\s+(para\s+o\s+)?(modelo\s+)?(pago|claude|paid)\b", re.I)
     switch_free = re.compile(r"\b(mudar|trocar|use|usar|ative|ativar|coloque|colocar)\s+(para\s+o\s+)?(modelo\s+)?(gratis|grátis|gratuito|free|nvidia)\b", re.I)
     close_home = re.compile(r"\b(fechar\s+(a\s+)?home|minimizar\s+(a\s+)?home|fechar\s+tela|minimizar\s+tela|fechar|minimizar|close\s+home|minimize\s+home)\b", re.I)
@@ -1225,6 +1234,9 @@ BRIEFING_TRIGGERS = re.compile(
     r"\b(abr[ae]\s+(a\s+)?(sua\s+)?home|resumo\s+do\s+dia|vis[aã]o\s+geral|"
     r"atualiza[cç][oõ]es\s+do\s+dia|panorama\s+do\s+dia|"
     r"(daily\s+)?(overview|briefing)|open\s+(your\s+)?home)\b", re.I)
+STOP_TRIGGERS = re.compile(
+    r"^\s*(para|pare|parar|cal[ae]|cala\s*a?\s*boca|chega|sil[eê]n[cç]io|"
+    r"stop|shut\s*up|quiet|be\s+quiet|enough)\s*[.!]?\s*$", re.I)
 
 
 def run_daily_briefing():
