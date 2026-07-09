@@ -981,55 +981,64 @@ class OrbApi:
         return "ok"
 
 
-def _parse_agenda():
-    raw = tool_read_calendar({"days_ahead": 1})
-    if raw.startswith(("BLOCKED", "(")):
-        return []
-    items = []
+def _add_mac_events(raw, items, seen):
     for line in raw.splitlines():
         if " -- " not in line:
             continue
         summary_part, when = line.split(" -- ", 1)
-        if ": " in summary_part:
-            cal_name, summary = summary_part.split(": ", 1)
-        else:
-            summary = summary_part
+        summary = summary_part.split(": ", 1)[1] if ": " in summary_part else summary_part
         summary = summary.strip()
-        # Skip birthday events from the regular agenda list
         if any(kw in summary.lower() for kw in ["faz ", "niver", "nasc", "aniv", "birth"]):
-            continue
+            continue  # birthdays get their own panel, not the regular agenda
         m = re.search(r"(\d{1,2}:\d{2})", when)
-        items.append({"time": m.group(1) if m else "", "title": summary})
+        t = m.group(1) if m else ""
+        if (t, summary.lower()) not in seen:
+            items.append({"time": t, "title": summary})
+            seen.add((t, summary.lower()))
 
-    seen = {(i["time"], i["title"].lower()) for i in items}
 
-    # merge today's Google Calendar events too (if linked), deduplicated
-    graw = tool_read_google_calendar({"days_ahead": 1})
-    if not graw.startswith(("BLOCKED", "(")):
-        for line in graw.splitlines():
-            if " -- " not in line:
-                continue
-            title, when = line.split(" -- ", 1)
-            title = title.strip()
-            m = re.search(r"T(\d{2}:\d{2})", when) or re.search(r"(\d{1,2}:\d{2})", when)
-            t = m.group(1) if m else ""
-            if (t, title.lower()) not in seen:
-                items.append({"time": t, "title": title})
-                seen.add((t, title.lower()))
+def _add_iso_events(raw, items, seen):
+    """Google and Outlook both return 'Title -- ISO8601 datetime' lines."""
+    for line in raw.splitlines():
+        if " -- " not in line:
+            continue
+        title, when = line.split(" -- ", 1)
+        title = title.strip()
+        m = re.search(r"T(\d{2}:\d{2})", when) or re.search(r"(\d{1,2}:\d{2})", when)
+        t = m.group(1) if m else ""
+        if (t, title.lower()) not in seen:
+            items.append({"time": t, "title": title})
+            seen.add((t, title.lower()))
 
-    # ...and Outlook/Microsoft 365, if linked
-    oraw = tool_read_outlook_calendar({"days_ahead": 1})
-    if not oraw.startswith(("BLOCKED", "(")):
-        for line in oraw.splitlines():
-            if " -- " not in line:
-                continue
-            title, when = line.split(" -- ", 1)
-            title = title.strip()
-            m = re.search(r"T(\d{2}:\d{2})", when) or re.search(r"(\d{1,2}:\d{2})", when)
-            t = m.group(1) if m else ""
-            if (t, title.lower()) not in seen:
-                items.append({"time": t, "title": title})
-                seen.add((t, title.lower()))
+
+def _parse_agenda():
+    """Merges today's events from every linked calendar source. Each source
+    is independent - one having nothing (or being unlinked/blocked) must
+    never stop the others from being checked, which is exactly the bug that
+    made a real meeting invisible when the Mac Calendar simply had no events
+    of its own today."""
+    items, seen = [], set()
+
+    try:
+        raw = tool_read_calendar({"days_ahead": 1})
+        if not raw.startswith(("BLOCKED", "(")):
+            _add_mac_events(raw, items, seen)
+    except Exception as e:  # noqa: BLE001
+        print("[agenda] Mac Calendar failed:", e)
+
+    try:
+        graw = tool_read_google_calendar({"days_ahead": 1})
+        if not graw.startswith(("BLOCKED", "(")):
+            _add_iso_events(graw, items, seen)
+    except Exception as e:  # noqa: BLE001
+        print("[agenda] Google Calendar failed:", e)
+
+    try:
+        oraw = tool_read_outlook_calendar({"days_ahead": 1})
+        if not oraw.startswith(("BLOCKED", "(")):
+            _add_iso_events(oraw, items, seen)
+    except Exception as e:  # noqa: BLE001
+        print("[agenda] Outlook Calendar failed:", e)
 
     return sorted(items, key=lambda e: e["time"])[:6]
 
