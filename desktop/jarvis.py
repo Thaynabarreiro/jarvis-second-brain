@@ -635,19 +635,42 @@ def think_nvidia(user_text):
 _play_lock = threading.Lock()
 
 
+def _find_ffmpeg():
+    """Apps launched at login (launchd/Task Scheduler) don't inherit the
+    Terminal's PATH, so a plain 'ffmpeg' lookup silently fails there even
+    though it works fine when started manually - which is exactly what
+    caused TTS to quietly fall back to the crackly decoder after autostart
+    was set up. Check common install locations directly instead of trusting
+    PATH."""
+    import shutil
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    for candidate in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg",
+                      "/usr/bin/ffmpeg", "C:\\ffmpeg\\bin\\ffmpeg.exe"):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+_FFMPEG_PATH = _find_ffmpeg()
+
+
 def _decode_audio(mp3_path):
     """Decode via ffmpeg when available - far more robust than libsndfile's
     mp3 support, which produces static/crackle on some clips. Falls back to
     soundfile if ffmpeg isn't installed."""
-    wav_path = mp3_path.with_suffix(".wav")
-    try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(mp3_path),
-             "-ar", "48000", "-ac", "1", str(wav_path)],
-            check=True, timeout=15, capture_output=True)
-        return sf.read(str(wav_path), dtype="float32")
-    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return sf.read(str(mp3_path), dtype="float32")
+    if _FFMPEG_PATH:
+        wav_path = mp3_path.with_suffix(".wav")
+        try:
+            subprocess.run(
+                [_FFMPEG_PATH, "-y", "-loglevel", "error", "-i", str(mp3_path),
+                 "-ar", "48000", "-ac", "1", str(wav_path)],
+                check=True, timeout=15, capture_output=True)
+            return sf.read(str(wav_path), dtype="float32")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
+    return sf.read(str(mp3_path), dtype="float32")
 
 
 def speak(text):
@@ -978,10 +1001,11 @@ def _parse_agenda():
         m = re.search(r"(\d{1,2}:\d{2})", when)
         items.append({"time": m.group(1) if m else "", "title": summary})
 
+    seen = {(i["time"], i["title"].lower()) for i in items}
+
     # merge today's Google Calendar events too (if linked), deduplicated
     graw = tool_read_google_calendar({"days_ahead": 1})
     if not graw.startswith(("BLOCKED", "(")):
-        seen = {(i["time"], i["title"].lower()) for i in items}
         for line in graw.splitlines():
             if " -- " not in line:
                 continue
@@ -991,6 +1015,21 @@ def _parse_agenda():
             t = m.group(1) if m else ""
             if (t, title.lower()) not in seen:
                 items.append({"time": t, "title": title})
+                seen.add((t, title.lower()))
+
+    # ...and Outlook/Microsoft 365, if linked
+    oraw = tool_read_outlook_calendar({"days_ahead": 1})
+    if not oraw.startswith(("BLOCKED", "(")):
+        for line in oraw.splitlines():
+            if " -- " not in line:
+                continue
+            title, when = line.split(" -- ", 1)
+            title = title.strip()
+            m = re.search(r"T(\d{2}:\d{2})", when) or re.search(r"(\d{1,2}:\d{2})", when)
+            t = m.group(1) if m else ""
+            if (t, title.lower()) not in seen:
+                items.append({"time": t, "title": title})
+                seen.add((t, title.lower()))
 
     return sorted(items, key=lambda e: e["time"])[:6]
 
