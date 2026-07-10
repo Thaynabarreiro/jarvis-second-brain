@@ -225,20 +225,21 @@ TASKS_REMOTE_LAST_SYNC = 0.0
 TASKS_REMOTE_SYNC_TTL = 30.0
 
 
-def _outlook_task_list(token, create=False):
+def _outlook_task_list(token, create=False, name=None):
     import requests
+    name = name or OUTLOOK_TASK_LIST_NAME
     try:
         r = requests.get("https://graph.microsoft.com/v1.0/me/todo/lists",
                          headers={"Authorization": f"Bearer {token}"}, timeout=12)
         r.raise_for_status()
         lists = r.json().get("value", [])
         for item in lists:
-            if item.get("displayName", "").strip().lower() == OUTLOOK_TASK_LIST_NAME.lower():
+            if item.get("displayName", "").strip().lower() == name.lower():
                 return item
         if create:
             r = requests.post("https://graph.microsoft.com/v1.0/me/todo/lists",
                               headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                              json={"displayName": OUTLOOK_TASK_LIST_NAME}, timeout=12)
+                              json={"displayName": name}, timeout=12)
             r.raise_for_status()
             return r.json()
     except Exception as e:  # noqa: BLE001
@@ -1106,10 +1107,18 @@ def audio_loop():
                 handle_interaction(stream, whisper, oww, lead=mono)
                 continue
 
-            # claps: two sharp peaks 0.12-0.8 s apart
+            # claps: two sharp NON-SPEECH transients 0.1-0.8 s apart. Plain
+            # loudness pairs false-fired constantly on animated conversation
+            # (plosives like P/T in an interview read as "claps" and Jarvis
+            # butted in uninvited). Real claps are impulses: almost all their
+            # energy in one instant, so the peak-to-RMS ratio (crest factor)
+            # is far higher than speech - require that, plus a higher floor.
             peak = np.abs(mono).max() / 32768.0
+            rms = float(np.sqrt(np.mean((mono.astype(np.float32) / 32768.0) ** 2))) or 1e-9
+            crest = peak / rms
             level = level * .97 + peak * .03
-            if peak > max(.35, level * 4) and STATE["mode"] == "idle":
+            if (peak > max(.5, level * 6) and crest > 4.5
+                    and not _is_speech(mono) and STATE["mode"] == "idle"):
                 now = time.time()
                 if .1 < now - clap_t < .8:
                     clap_t = 0
@@ -1117,9 +1126,11 @@ def audio_loop():
                     continue
                 clap_t = now
 
-            # wake word
+            # wake word - 0.4 was loosened while a (since-fixed) audio-thread
+            # freeze was eating detections; with that gone it just made other
+            # people's speech wake him. Back to a strict threshold.
             score = oww.predict(mono)["hey_jarvis"]
-            if score > .4:
+            if score > .6:
                 oww.reset()
                 if STATE["mode"] == "speaking":
                     interrupt_speech()  # barge-in: talk over Jarvis to stop him
@@ -1227,7 +1238,41 @@ def process_utterance(whisper, audio, generation):
 
     if close_home.search(text):
         HOME_MODE["active"] = False
+        STUDY_MODE["active"] = False
         speak("Fechando a tela, senhora. [LANG:pt]")
+        followup_until = time.time() + FOLLOWUP_WINDOW
+        return
+
+    m = STUDY_OPEN_TRIGGERS.search(text)
+    if m:
+        track_id = _study_track_from_text(text)
+        if track_id:
+            HOME_MODE["active"] = False
+            STUDY_MODE["track"] = track_id
+            STUDY_MODE["active"] = True
+            name = study_mod.TRACKS[track_id]["name"]
+            speak(f"Abrindo a sessão de estudo de {name}. Bons estudos, senhora. [LANG:pt]")
+        else:
+            speak("De qual trilha, senhora? Inteligência artificial ou francês? [LANG:pt]")
+        followup_until = time.time() + FOLLOWUP_WINDOW
+        return
+
+    if STUDY_TODAY_TRIGGERS.search(text):
+        speak(_study_today_text() + " [LANG:pt]")
+        followup_until = time.time() + FOLLOWUP_WINDOW
+        return
+
+    if STUDY_COMPLETE_TRIGGERS.search(text):
+        track_id = _study_track_from_text(text)
+        if track_id:
+            n = finish_study_session(track_id)
+            name = study_mod.TRACKS[track_id]["name"]
+            if n:
+                speak(f"Sessão {n} de {name} concluída e registrada, senhora. Excelente trabalho. [LANG:pt]")
+            else:
+                speak(f"A trilha de {name} já está toda concluída, senhora. [LANG:pt]")
+        else:
+            speak("Concluir a sessão de qual trilha, senhora? IA ou francês? [LANG:pt]")
         followup_until = time.time() + FOLLOWUP_WINDOW
         return
 
@@ -1282,9 +1327,128 @@ def quit_jarvis():
     os._exit(0)
 
 
+# ---------------------------------------------------------------- study mode
+import study as study_mod
+
+STUDY_MODE = {"active": False, "track": None}
+STUDY_TODO_LIST = "Estudos"
+
+STUDY_OPEN_TRIGGERS = re.compile(
+    r"\b(abr[ae]|abrir|inicia[r]?|come[cç]a[r]?)\b.{0,30}\b(interface|tela|modo|sess[aã]o)\s+de\s+estudo", re.I)
+STUDY_TODAY_TRIGGERS = re.compile(
+    r"\b(o\s*que\s+(eu\s+)?estudo\s+hoje|estudo\s+de\s+hoje|sess[oõ]es?\s+de\s+hoje|"
+    r"what\s+do\s+i\s+study\s+today)\b", re.I)
+STUDY_COMPLETE_TRIGGERS = re.compile(
+    r"\b(conclu[ií][r]?|finaliza[r]?|termine[i]?|terminar|acabei)\b.{0,25}\bsess[aã]o\b", re.I)
+_TRACK_HINTS = re.compile(r"\b(franc[eê]s|french)\b", re.I), re.compile(r"\b(ia|a\.?i\.?|intelig[eê]ncia)\b", re.I)
+
+
+def _study_track_from_text(text):
+    fr, ai = _TRACK_HINTS
+    if fr.search(text):
+        return "frances"
+    if ai.search(text):
+        return "ai"
+    return None
+
+
+def _study_today_text():
+    parts = []
+    for item in study_mod.study_summary():
+        if item["done"]:
+            parts.append(f"A trilha de {item['name']} está concluída")
+        else:
+            title = re.sub(r"^[^A-Za-zÀ-ÿ]*Sess[aã]o\s*\d+\s*[—:-]\s*", "", item["title"] or "")
+            parts.append(f"{item['name']}: sessão {item['session']} de {item['total']}, {title}")
+    return "Hoje, " + ". ".join(parts) + "."
+
+
+def _study_task_title(track_id, n):
+    prefix = study_mod.TRACKS[track_id]["todo_prefix"]
+    title = study_mod.session_title(track_id, n) or f"Sessão {n}"
+    return f"{prefix} — Sessão {n}: {title}"
+
+
+def ensure_study_todo_tasks():
+    """Once a day: each track's session-of-the-day gets a task in the
+    'Estudos' To Do list (due today) if one doesn't already exist."""
+    try:
+        token, err = _outlook_token()
+        if err:
+            return
+        list_info = _outlook_task_list(token, create=True, name=STUDY_TODO_LIST)
+        if not list_info:
+            return
+        import requests
+        r = requests.get(
+            f"https://graph.microsoft.com/v1.0/me/todo/lists/{list_info['id']}/tasks",
+            headers={"Authorization": f"Bearer {token}"}, params={"$top": 100}, timeout=15)
+        r.raise_for_status()
+        existing = {t.get("title", ""): t for t in r.json().get("value", [])
+                    if t.get("status") != "completed"}
+        today = datetime.now().strftime("%Y-%m-%d")
+        for track_id in study_mod.TRACKS:
+            n = study_mod.current_session(track_id)
+            if n is None:
+                continue
+            title = _study_task_title(track_id, n)
+            if title in existing:
+                continue
+            prefix = study_mod.TRACKS[track_id]["todo_prefix"]
+            already_has_track_task = any(t.startswith(f"{prefix} — Sessão") for t in existing)
+            if already_has_track_task:
+                continue  # an older session task is still open - don't stack a second one
+            requests.post(
+                f"https://graph.microsoft.com/v1.0/me/todo/lists/{list_info['id']}/tasks",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"title": title, "status": "notStarted",
+                      "dueDateTime": {"dateTime": f"{today}T00:00:00", "timeZone": OUTLOOK_TIMEZONE}},
+                timeout=15)
+            print(f"[Study] To Do task created: {title}")
+    except Exception as e:  # noqa: BLE001
+        print("[Study] To Do task creation failed:", e)
+
+
+def complete_study_todo_task(track_id, n):
+    """Marks the matching 'Estudos' task completed, matching by the stable
+    'Prefix — Sessão N' start rather than the full title."""
+    try:
+        token, err = _outlook_token()
+        if err:
+            return False
+        list_info = _outlook_task_list(token, create=False, name=STUDY_TODO_LIST)
+        if not list_info:
+            return False
+        import requests
+        r = requests.get(
+            f"https://graph.microsoft.com/v1.0/me/todo/lists/{list_info['id']}/tasks",
+            headers={"Authorization": f"Bearer {token}"}, params={"$top": 100}, timeout=15)
+        r.raise_for_status()
+        prefix = f"{study_mod.TRACKS[track_id]['todo_prefix']} — Sessão {n}"
+        for t in r.json().get("value", []):
+            if t.get("title", "").startswith(prefix) and t.get("status") != "completed":
+                requests.patch(
+                    f"https://graph.microsoft.com/v1.0/me/todo/lists/{list_info['id']}/tasks/{t['id']}",
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    json={"status": "completed"}, timeout=15)
+                print(f"[Study] To Do task completed: {t['title']}")
+                return True
+    except Exception as e:  # noqa: BLE001
+        print("[Study] To Do task completion failed:", e)
+    return False
+
+
+def finish_study_session(track_id, minutes=0):
+    n = study_mod.complete_session(track_id, minutes)
+    if n is not None:
+        threading.Thread(target=complete_study_todo_task, args=(track_id, n), daemon=True).start()
+    return n
+
+
 # ---------------------------------------------------------------- orb
 ORB_HTML = (APP_DIR / "orb.html").read_text(encoding="utf-8")
 HOME_HTML = (APP_DIR / "home.html").read_text(encoding="utf-8")
+STUDY_HTML = (APP_DIR / "study.html").read_text(encoding="utf-8")
 ORB_SIZE = 170
 MARGIN = 24
 
@@ -1341,6 +1505,7 @@ class OrbApi:
             "birthdays": CACHED_HOME_DATA["birthdays"],
             "outreach": CACHED_HOME_DATA["outreach"],
             "tasks": get_task_summary(),
+            "study": CACHED_HOME_DATA.get("study", []),
             "topic": HOME_MODE["topic"],
             "state": STATE,
         }
@@ -1356,6 +1521,44 @@ class OrbApi:
         interrupt_speech()  # the X button must silence him too, not just hide the screen
         HOME_MODE["active"] = False
         set_state("idle")
+        return "ok"
+
+    # ---- study screen bridge ----
+    def open_study(self, track_id):
+        if track_id not in study_mod.TRACKS:
+            return "unknown_track"
+        HOME_MODE["active"] = False
+        STUDY_MODE["track"] = track_id
+        STUDY_MODE["active"] = True
+        return "ok"
+
+    def get_study_data(self):
+        track_id = STUDY_MODE.get("track")
+        if not track_id:
+            return {}
+        data = study_mod.render_session_html(track_id)
+        data["total"] = study_mod.TRACKS[track_id]["total"]
+        progress = study_mod._load_progress().get(track_id, {})
+        data["total_minutes"] = progress.get("total_minutes", 0)
+        return data
+
+    def log_study_minutes(self, track_id, minutes):
+        study_mod.log_minutes(track_id, minutes)
+        return "ok"
+
+    def complete_study_session(self, track_id):
+        n = finish_study_session(track_id)
+        return f"completed_{n}" if n else "already_done"
+
+    def close_study(self):
+        STUDY_MODE["active"] = False
+        STUDY_MODE["track"] = None
+        return "ok"
+
+    def open_url(self, url):
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            opener = "open" if platform.system() == "Darwin" else "start"
+            subprocess.Popen([opener, url] if opener == "open" else ["cmd", "/c", "start", "", url])
         return "ok"
 
 
@@ -1670,8 +1873,20 @@ def home_data_refresher_loop():
             CACHED_HOME_DATA["agenda"] = agenda
             CACHED_HOME_DATA["outreach"] = outreach
             CACHED_HOME_DATA["birthdays"] = birthdays
+            CACHED_HOME_DATA["study"] = study_mod.study_summary()
             CACHED_HOME_DATA["last_refreshed"] = time.time()
             print("[CacheRefresher] Refresh completed successfully.")
+
+            # once per day, mirror the sessions-of-the-day into the To Do list
+            today = datetime.now().strftime("%Y-%m-%d")
+            marker = JARVIS_HOME / "last_study_todo_date.txt"
+            try:
+                already = marker.read_text().strip() == today
+            except FileNotFoundError:
+                already = False
+            if not already:
+                ensure_study_todo_tasks()
+                marker.write_text(today)
         except Exception as e:
             print("[CacheRefresher] Error in refresh loop:", e)
         time.sleep(120)
@@ -1870,33 +2085,36 @@ def orb_position_loop(win):
         home = _default_home(win)
     win.move(*home)
     last_known, moving_until, last_mode = home, 0.0, "idle"
-    home_screen_open = False
+    fullscreen_view = None  # None | "home" | "study" - which big screen is loaded
 
     while True:
         time.sleep(.15)
 
-        if HOME_MODE["active"]:
-            if not home_screen_open:
+        # study screen outranks home; both are fullscreen takeovers of the
+        # same window, restored to the small orb when neither is active
+        want = "study" if STUDY_MODE["active"] else "home" if HOME_MODE["active"] else None
+        if want:
+            if fullscreen_view != want:
                 try:
                     screen = webview.screens[0] if webview.screens else None
                     sw, sh = (screen.width, screen.height) if screen else (1440, 900)
-                    win.load_html(HOME_HTML)
+                    win.load_html(STUDY_HTML if want == "study" else HOME_HTML)
                     win.resize(sw, sh)
                     win.move(0, 0)
                 except Exception as e:  # noqa: BLE001
-                    print("home screen open failed:", e)
-                home_screen_open = True
+                    print(f"{want} screen open failed:", e)
+                fullscreen_view = want
             last_mode = STATE["mode"]
             continue
-        elif home_screen_open:
+        elif fullscreen_view:
             try:
                 win.load_html(ORB_HTML)
                 win.resize(ORB_SIZE, ORB_SIZE)
                 win.move(*home)
             except Exception as e:  # noqa: BLE001
-                print("home screen close failed:", e)
+                print("fullscreen close failed:", e)
             last_known, moving_until = home, time.time() + .6
-            home_screen_open = False
+            fullscreen_view = None
             last_mode = "idle"
             continue
 

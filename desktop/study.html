@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+  /* Light study palette (Anthropic-inspired): warm paper, ink text, terracotta accent */
+  :root{
+    --paper:#FAF9F5; --card:#FFFFFF; --ink:#141413; --muted:#6A675F;
+    --accent:#D97757; --accent-soft:#F5E6DF; --line:#E8E5DD;
+    --font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    --font-mono:"SF Mono",Menlo,Consolas,monospace;
+  }
+  html,body{margin:0;height:100%;background:var(--paper);color:var(--ink);
+    font-family:var(--font-sans);-webkit-user-select:none}
+  #layout{display:flex;height:100vh;overflow:hidden}
+
+  /* left rail: timer + controls */
+  #rail{width:300px;flex-shrink:0;border-right:1px solid var(--line);padding:28px 24px;
+    display:flex;flex-direction:column;gap:18px;box-sizing:border-box;background:var(--card)}
+  #trackName{font-family:var(--font-mono);font-size:11px;letter-spacing:.14em;
+    text-transform:uppercase;color:var(--accent)}
+  #sessTitle{font-size:17px;font-weight:600;line-height:1.35}
+  #progressLbl{font-family:var(--font-mono);font-size:11px;color:var(--muted)}
+
+  #picker{display:flex;flex-direction:column;gap:10px}
+  #picker .presets{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  #picker button{padding:12px 0;border-radius:10px;border:1px solid var(--line);
+    background:var(--paper);color:var(--ink);font-size:15px;font-weight:600;cursor:pointer}
+  #picker button:hover{border-color:var(--accent);background:var(--accent-soft)}
+  #customMin{width:100%;box-sizing:border-box;padding:10px;border-radius:10px;
+    border:1px solid var(--line);font-size:14px;background:var(--paper);color:var(--ink)}
+
+  #timerBox{display:none;flex-direction:column;align-items:center;gap:12px}
+  #clock{font-family:var(--font-mono);font-size:58px;font-weight:600;letter-spacing:-.02em}
+  #clock.paused{color:var(--muted)}
+  #timerBtns{display:flex;gap:8px;width:100%}
+  #timerBtns button{flex:1;padding:10px 0;border-radius:10px;border:1px solid var(--line);
+    background:var(--paper);cursor:pointer;font-size:13px;font-weight:600;color:var(--ink)}
+  #timerBtns button:hover{border-color:var(--accent)}
+
+  .spacer{flex:1}
+  .action{padding:13px 0;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;width:100%}
+  #btnComplete{background:var(--accent);color:#fff;border:none}
+  #btnComplete:hover{filter:brightness(1.06)}
+  #btnBack{background:none;border:1px solid var(--line);color:var(--muted)}
+  #btnBack:hover{border-color:var(--muted)}
+
+  /* right pane: rendered lesson */
+  #lesson{flex:1;overflow-y:auto;padding:36px 48px;box-sizing:border-box;max-width:860px}
+  #lesson h1{font-size:26px;letter-spacing:-.01em;border-bottom:2px solid var(--accent-soft);padding-bottom:10px}
+  #lesson h2{font-size:19px;margin-top:28px;color:var(--ink)}
+  #lesson h3{font-size:16px;margin-top:22px}
+  #lesson p,#lesson li{font-size:15px;line-height:1.7;color:#33312C}
+  #lesson strong{color:var(--ink)}
+  #lesson a{color:var(--accent);text-decoration:none;border-bottom:1px solid var(--accent-soft)}
+  #lesson a:hover{border-bottom-color:var(--accent)}
+  #lesson table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
+  #lesson th,#lesson td{border:1px solid var(--line);padding:8px 10px;text-align:left}
+  #lesson th{background:var(--accent-soft);font-weight:600}
+  #lesson code{background:#F1EFE9;border-radius:4px;padding:1px 5px;font-family:var(--font-mono);font-size:13px}
+  #lesson blockquote{border-left:3px solid var(--accent);margin:12px 0;padding:4px 16px;color:var(--muted)}
+  #lesson hr{border:none;border-top:1px solid var(--line);margin:24px 0}
+  #lesson input[type=checkbox]{accent-color:var(--accent)}
+  .yt-card{display:flex;align-items:center;gap:14px;margin:12px 0;padding:10px;
+    border:1px solid var(--line);border-radius:12px;background:var(--card);
+    text-decoration:none!important;border-bottom:1px solid var(--line)!important;max-width:440px}
+  .yt-card img{width:168px;border-radius:8px;display:block}
+  .yt-card span{font-size:14px;font-weight:600;color:var(--ink)}
+</style></head>
+<body>
+<div id="layout">
+  <div id="rail">
+    <div>
+      <div id="trackName">—</div>
+      <div id="sessTitle" style="margin-top:8px">Carregando…</div>
+      <div id="progressLbl" style="margin-top:8px">—</div>
+    </div>
+
+    <div id="picker">
+      <div class="label" style="font-family:var(--font-mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)">Duração da sessão</div>
+      <div class="presets">
+        <button onclick="startTimer(25)">25 min</button>
+        <button onclick="startTimer(50)">50 min</button>
+        <button onclick="startTimer(90)">90 min</button>
+        <button onclick="startTimer(120)">120 min</button>
+      </div>
+      <input id="customMin" type="number" min="1" max="480" placeholder="Outra duração (min) — Enter">
+    </div>
+
+    <div id="timerBox">
+      <div id="clock">00:00</div>
+      <div id="timerBtns">
+        <button id="btnPause" onclick="togglePause()">Pausar</button>
+        <button onclick="resetTimer()">Zerar</button>
+      </div>
+    </div>
+
+    <div class="spacer"></div>
+    <button id="btnComplete" class="action" onclick="completeSession()">✓ Concluir sessão</button>
+    <button id="btnBack" class="action" onclick="goBack()">Voltar sem concluir</button>
+  </div>
+
+  <div id="lesson"><p style="color:var(--muted)">Carregando a aula…</p></div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+let trackId=null, sessionN=null;
+let totalSec=0, remainSec=0, timerId=null, paused=false, elapsedSec=0;
+
+function fmt(s){const m=Math.floor(s/60),ss=s%60;return String(m).padStart(2,'0')+':'+String(ss).padStart(2,'0');}
+
+function startTimer(min){
+  totalSec=remainSec=min*60; elapsedSec=0; paused=false;
+  $('picker').style.display='none'; $('timerBox').style.display='flex';
+  $('clock').textContent=fmt(remainSec);
+  timerId=setInterval(tick,1000);
+}
+$('customMin').addEventListener('keydown',e=>{
+  if(e.key==='Enter'){const v=parseInt($('customMin').value,10);if(v>0)startTimer(v);}
+});
+function tick(){
+  if(paused)return;
+  remainSec--; elapsedSec++;
+  $('clock').textContent=fmt(Math.max(remainSec,0));
+  if(remainSec<=0){
+    clearInterval(timerId);timerId=null;
+    timerDone();
+  }
+}
+function togglePause(){
+  paused=!paused;
+  $('btnPause').textContent=paused?'Retomar':'Pausar';
+  $('clock').classList.toggle('paused',paused);
+}
+function resetTimer(){
+  if(timerId){clearInterval(timerId);timerId=null;}
+  flushMinutes();
+  $('picker').style.display='flex'; $('timerBox').style.display='none';
+}
+function timerDone(){
+  // audible chime (WebAudio, no backend round-trip)
+  try{
+    const ctx=new (window.AudioContext||window.webkitAudioContext)();
+    [0,0.35,0.7].forEach((t,i)=>{
+      const o=ctx.createOscillator(),g=ctx.createGain();
+      o.frequency.value=880+i*220; o.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(.0001,ctx.currentTime+t);
+      g.gain.exponentialRampToValueAtTime(.4,ctx.currentTime+t+.03);
+      g.gain.exponentialRampToValueAtTime(.0001,ctx.currentTime+t+.5);
+      o.start(ctx.currentTime+t); o.stop(ctx.currentTime+t+.55);
+    });
+  }catch(e){}
+  flushMinutes();
+  $('clock').textContent='FIM!';
+}
+function flushMinutes(){
+  const mins=Math.round(elapsedSec/60);
+  if(mins>0 && trackId){
+    try{window.pywebview.api.log_study_minutes(trackId, mins);}catch(e){}
+  }
+  elapsedSec=0;
+}
+
+async function completeSession(){
+  flushMinutes();
+  try{await window.pywebview.api.complete_study_session(trackId);}catch(e){}
+  goBack(true);
+}
+function goBack(skipFlush){
+  if(!skipFlush)flushMinutes();
+  if(timerId){clearInterval(timerId);timerId=null;}
+  try{window.pywebview.api.close_study();}catch(e){}
+}
+
+// intercept lesson links: open in the real browser, never inside this webview
+document.addEventListener('click',e=>{
+  const a=e.target.closest('a');
+  if(a&&a.href&&a.href.startsWith('http')){
+    e.preventDefault();
+    try{window.pywebview.api.open_url(a.href);}catch(err){}
+  }
+});
+
+function buildThumbs(){
+  document.querySelectorAll('.yt-thumb-anchor').forEach(el=>{
+    const vid=el.dataset.vid;
+    const card=document.createElement('a');
+    card.className='yt-card'; card.href='https://www.youtube.com/watch?v='+vid;
+    card.innerHTML=`<img src="https://img.youtube.com/vi/${vid}/hqdefault.jpg" alt="YouTube"><span>▶ Assistir no YouTube</span>`;
+    el.replaceWith(card);
+  });
+}
+
+async function load(){
+  try{
+    const d=await window.pywebview.api.get_study_data();
+    trackId=d.track_id; sessionN=d.session;
+    $('trackName').textContent=d.track||'';
+    $('sessTitle').textContent=d.title||'';
+    $('progressLbl').textContent=d.session?`Sessão ${d.session} de ${d.total} · ${d.total_minutes||0} min estudados`:'Trilha concluída 🎉';
+    $('lesson').innerHTML=d.html||'';
+    buildThumbs();
+  }catch(e){ setTimeout(load,400); }
+}
+load();
+</script>
+</body></html>

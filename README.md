@@ -40,6 +40,17 @@ Two versions live in this repo:
 - Optional **Slack bridge** — DM or @mention Jarvis on Slack for the same brain, no voice needed
 - **Conversation memory** — remembers the last ~24 turns across a restart (as long as it's within
   3 hours; older gets treated as a fresh session instead of confusing stale context)
+- **Study mode** — tracks progress through markdown study plans (sessions per track live as .md
+  files; progress lives in `~/.jarvis/study_progress.json`, the plans are never modified). Say
+  "abra a interface de estudo de francês / de IA" (or click the Estudos card on the home screen)
+  for a **light-palette study screen**: pick a timer (25/50/90/120 min or custom, with
+  pause/resume and an end-of-timer chime), the session's markdown rendered as a lesson page
+  (tables, checklists, links open in the real browser, YouTube links get an inline clickable
+  thumbnail), and a "Concluir sessão" button that advances the track. Every day the session-of-
+  the-day for each track is mirrored into a Microsoft To Do list called "Estudos" (due today),
+  and completing a session checks off the matching task. Also: "o que eu estudo hoje?" and
+  "concluir sessão de [IA/francês]" work by voice, and you can keep talking to Jarvis while the
+  study screen is open. Track paths/structure are configured in `desktop/study.py`.
 
 Wake it three ways: say **"Hey Jarvis"**, **clap twice**, or **click the orb**.
 Speak over it ("Hey Jarvis…") to interrupt mid-sentence. After he answers, he keeps listening

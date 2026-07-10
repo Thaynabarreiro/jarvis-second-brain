@@ -163,6 +163,18 @@
     </div>
   </div>
 
+  <!-- LEFT: study tracks -->
+  <div style="position:absolute; top:640px; left:32px; width:270px; z-index:3">
+    <div class="panel" id="panel-study">
+      <div class="glow"></div>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px">
+        <span class="label">Estudos</span>
+        <span id="study-progress" class="mono" style="font-size:9px; color:var(--signal)"></span>
+      </div>
+      <div id="study-tracks" style="display:flex; flex-direction:column"></div>
+    </div>
+  </div>
+
   <!-- RIGHT: weather -->
   <div id="weatherWrap" style="position:absolute; top:80px; right:32px; width:270px; z-index:3; display:none">
     <div class="panel" id="panel-weather">
@@ -271,7 +283,7 @@ function applyMode(mode, text){
   $('caption').textContent=mode==='idle'?'':(text||'');
 }
 
-const PANEL_IDS={greeting:'panel-greeting',weather:'panel-weather',agenda:'panel-agenda',outreach:'panel-outreach',tasks:'panel-tasks'};
+const PANEL_IDS={greeting:'panel-greeting',weather:'panel-weather',agenda:'panel-agenda',outreach:'panel-outreach',tasks:'panel-tasks',study:'panel-study'};
 function setActiveTopic(topic){
   Object.entries(PANEL_IDS).forEach(([key,id])=>{
     const el=$(id);if(!el)return;
@@ -356,6 +368,26 @@ function renderOutreach(outreach) {
   $('outreach-followups').textContent = outreach.followups || 0;
 }
 
+function renderStudy(items){
+  const el=$('study-tracks');
+  if(!items||!items.length){el.innerHTML='';return;}
+  $('study-progress').textContent=items.map(t=>`${t.session||'✓'}/${t.total}`).join(' · ');
+  el.innerHTML=items.map(t=>{
+    const title=(t.title||'').replace(/^[^A-Za-zÀ-ÿ]*Sess[aã]o\s*\d+\s*[—:\-]\s*/,'');
+    const line=t.done?'Trilha concluída 🎉':`Sessão ${t.session}/${t.total} · ${title}`;
+    return `<div onclick="openStudy('${t.id}')" style="display:flex;gap:10px;padding:9px 0;border-top:1px solid rgba(244,241,234,.07);cursor:pointer">
+      <div style="width:2px;border-radius:2px;flex-shrink:0;background:var(--signal)"></div>
+      <div style="min-width:0">
+        <div style="font-size:13px;font-weight:600;color:var(--paper)">${t.name}</div>
+        <div class="mono" style="font-size:10px;color:var(--ash);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${line}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+function openStudy(trackId){
+  try{window.pywebview.api.open_study(trackId);}catch(e){}
+}
+
 function closeHome() {
   try {
     window.pywebview.api.close_home();
@@ -375,6 +407,7 @@ async function refresh(){
     renderBirthdays(d.birthdays);
     renderOutreach(d.outreach);
     renderTasks(d.tasks);
+    renderStudy(d.study);
     setActiveTopic(d.topic);
     applyMode(d.state.mode, d.state.text);
   }catch(e){}
