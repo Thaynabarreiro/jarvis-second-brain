@@ -151,6 +151,18 @@
     </div>
   </div>
 
+  <!-- LEFT: global tasks across all projects -->
+  <div style="position:absolute; top:430px; left:32px; width:270px; z-index:3">
+    <div class="panel" id="panel-tasks">
+      <div class="glow"></div>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px">
+        <span class="label">Tarefas &middot; todos os projetos</span>
+        <span id="tasks-count" class="mono" style="font-size:9px; color:var(--signal)">0</span>
+      </div>
+      <div id="tasks-summary" style="display:flex; flex-direction:column"></div>
+    </div>
+  </div>
+
   <!-- RIGHT: weather -->
   <div id="weatherWrap" style="position:absolute; top:80px; right:32px; width:270px; z-index:3; display:none">
     <div class="panel" id="panel-weather">
@@ -174,6 +186,14 @@
         <span class="label">Outreach &middot; Métricas</span>
         <span class="mono" style="font-size:8px; color:var(--signal); letter-spacing:0.05em;">ONTEM</span>
       </div>
+      <div style="display:flex; align-items:baseline; gap:8px; margin-bottom:10px;">
+        <span id="outreach-sent" style="font-size:30px; font-weight:500; line-height:1; color:var(--paper)">0</span>
+        <span class="mono" style="font-size:9px; letter-spacing:0.04em; text-transform:uppercase; color:var(--ash);">enviadas</span>
+        <span id="outreach-failed-wrap" style="margin-left:auto; display:none;">
+          <span id="outreach-failed" style="font-size:14px; font-weight:500; color:#E8A05C;">0</span>
+          <span class="mono" style="font-size:8px; text-transform:uppercase; color:#E8A05C;"> falhou</span>
+        </span>
+      </div>
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
         <div style="padding:10px 8px; border-radius:6px; background:rgba(244,241,234,0.02); border:1px solid rgba(244,241,234,0.06); text-align:center;">
           <div id="outreach-felipe" style="font-size:20px; font-weight:500; line-height:1; color:var(--paper)">0</div>
@@ -189,7 +209,7 @@
             <span style="font-size:12px; color:var(--ash);">/</span>
             <span id="outreach-negatives" style="font-size:16px; color:#E8A05C;">0</span>
           </div>
-          <div style="font-family:var(--font-mono); font-size:8px; letter-spacing:0.04em; text-transform:uppercase; color:var(--signal); margin-top:5px;">Respostas Pos / Neg</div>
+          <div style="font-family:var(--font-mono); font-size:8px; letter-spacing:0.04em; text-transform:uppercase; color:var(--signal); margin-top:5px;">Em conversa / Perdidos &middot; total</div>
         </div>
         <div style="padding:10px 8px; border-radius:6px; background:rgba(244,241,234,0.02); border:1px solid rgba(244,241,234,0.06); text-align:center; grid-column: span 2;">
           <div id="outreach-followups" style="font-size:20px; font-weight:500; line-height:1; color:var(--paper)">0</div>
@@ -251,7 +271,7 @@ function applyMode(mode, text){
   $('caption').textContent=mode==='idle'?'':(text||'');
 }
 
-const PANEL_IDS={greeting:'panel-greeting',weather:'panel-weather',agenda:'panel-agenda',outreach:'panel-outreach'};
+const PANEL_IDS={greeting:'panel-greeting',weather:'panel-weather',agenda:'panel-agenda',outreach:'panel-outreach',tasks:'panel-tasks'};
 function setActiveTopic(topic){
   Object.entries(PANEL_IDS).forEach(([key,id])=>{
     const el=$(id);if(!el)return;
@@ -282,6 +302,24 @@ function renderAgenda(items){
     </div>`).join('');
 }
 
+function renderTasks(tasks){
+  const el=$('tasks-summary');
+  if(!tasks){return;}
+  $('tasks-count').textContent=(tasks.open||0)+' abertas';
+  if(!tasks.items || !tasks.items.length){
+    el.innerHTML='<div class="mono" style="font-size:11px;color:var(--ash);padding:8px 0">Nenhuma tarefa para hoje.</div>';
+    return;
+  }
+  el.innerHTML=tasks.items.map(t=>`
+    <div style="padding:7px 0;border-top:1px solid rgba(244,241,234,.07)">
+      <div style="font-size:12px;font-weight:500;color:var(--paper);line-height:1.25">${t.title}</div>
+      <div class="mono" style="font-size:9px;color:var(--ash);margin-top:3px">${t.project||'Geral'}${t.priority==='high'?' · ALTA':''}</div>
+    </div>`).join('');
+  if(tasks.overdue){
+    el.insertAdjacentHTML('afterbegin', `<div class="mono" style="font-size:10px;color:#E8A05C;padding:0 0 5px">${tasks.overdue} atrasada(s)</div>`);
+  }
+}
+
 function renderBirthdays(birthdays) {
   const el = $('birthday-panel');
   if (!birthdays || birthdays.length === 0) {
@@ -307,6 +345,10 @@ function renderBirthdays(birthdays) {
 
 function renderOutreach(outreach) {
   if (!outreach) return;
+  $('outreach-sent').textContent = outreach.messages_sent || 0;
+  const failed = outreach.messages_failed || 0;
+  $('outreach-failed-wrap').style.display = failed > 0 ? 'inline' : 'none';
+  $('outreach-failed').textContent = failed;
   $('outreach-felipe').textContent = outreach.felipe_sent || 0;
   $('outreach-thayna').textContent = outreach.thayna_sent || 0;
   $('outreach-positives').textContent = outreach.positives || 0;
@@ -332,6 +374,7 @@ async function refresh(){
     renderWeather(d.weather);
     renderBirthdays(d.birthdays);
     renderOutreach(d.outreach);
+    renderTasks(d.tasks);
     setActiveTopic(d.topic);
     applyMode(d.state.mode, d.state.text);
   }catch(e){}

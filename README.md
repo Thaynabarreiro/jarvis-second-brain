@@ -255,9 +255,9 @@ Google Calendar, not just Mac Calendar). If you linked Google Calendar before th
 **delete `~/.jarvis/google_token.json`** and re-run step 4 once to re-grant with the new scope -
 otherwise event creation silently only reaches the Mac Calendar.
 
-## 📆 Outlook Calendar setup (optional)
+## 📆 Outlook Calendar and To Do setup (optional)
 
-To read a Microsoft 365 / Outlook.com calendar:
+To let Jarvis read and create Microsoft 365 / Outlook.com calendar events and manage personal tasks in Microsoft To Do:
 
 1. Go to <https://portal.azure.com> → search **"App registrations"** → **New registration**.
    - Name: "Jarvis" (or anything)
@@ -269,7 +269,7 @@ To read a Microsoft 365 / Outlook.com calendar:
 3. **Authentication** (left sidebar) → scroll to **Advanced settings** →
    **"Allow public client flows"** → set to **Yes** → **Save**.
 4. **API permissions** → **Add a permission** → **Microsoft Graph** → **Delegated permissions** →
-   search `Calendars.Read` → add it. (No admin approval needed for personal use.)
+   add `Calendars.ReadWrite` and `Tasks.ReadWrite`. (No admin approval needed for personal use.)
 5. Paste the client ID into `config.json`:
    ```json
    "outlook_client_id": "your-application-client-id"
@@ -281,7 +281,7 @@ To read a Microsoft 365 / Outlook.com calendar:
    ```
    It prints a short code and a link to **microsoft.com/devicelogin** — open that link on any
    device, enter the code, sign in with your Microsoft account. Done — the token is cached and
-   refreshes itself.
+   refreshes itself. Jarvis creates tasks in a Microsoft To Do list called **Jarvis**.
 
 ## 💬 Slack setup (optional)
 

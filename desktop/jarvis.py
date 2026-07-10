@@ -31,6 +31,7 @@ JARVIS_HOME = Path.home() / ".jarvis"
 JARVIS_HOME.mkdir(exist_ok=True)
 CONFIG_PATH = JARVIS_HOME / "config.json"
 MEMORY_PATH = JARVIS_HOME / "memory.md"
+TASKS_PATH = JARVIS_HOME / "tasks.json"
 HOME = str(Path.home())
 
 DEFAULT_CONFIG = {
@@ -72,11 +73,26 @@ def save_orb_position(x, y):
 
 STATE = {"mode": "idle", "text": ""}  # idle|listening|thinking|speaking
 WAKE_QUEUE = queue.Queue()
+TASKS_LOCK = threading.Lock()
+INTERACTION_LOCK = threading.Lock()
+INTERACTION_GENERATION = 0
 
 
 def set_state(mode, text=""):
     STATE["mode"] = mode
     STATE["text"] = text
+
+
+def _new_interaction_generation():
+    global INTERACTION_GENERATION
+    with INTERACTION_LOCK:
+        INTERACTION_GENERATION += 1
+        return INTERACTION_GENERATION
+
+
+def _interaction_is_current(generation):
+    with INTERACTION_LOCK:
+        return generation == INTERACTION_GENERATION
 
 
 # ---------------------------------------------------------------- tools
@@ -162,6 +178,276 @@ def tool_remember(args):
     with open(MEMORY_PATH, "a", encoding="utf-8") as f:
         f.write(f"- [{stamp}] {args['fact']}\n")
     return "remembered"
+
+
+# ---------------------------------------------------------------- global tasks
+def _load_tasks():
+    """Read the single task list shared by all projects on this Mac."""
+    try:
+        data = json.loads(TASKS_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return []
+
+
+def _save_tasks(tasks):
+    TASKS_PATH.write_text(json.dumps(tasks, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _normalise_due_date(value):
+    if not value:
+        return ""
+    value = str(value).strip()
+    if value.lower() in {"hoje", "today"}:
+        return datetime.now().strftime("%Y-%m-%d")
+    if value.lower() in {"amanhã", "amanha", "tomorrow"}:
+        return (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    return value
+
+
+def _task_label(task):
+    due = task.get("due_date") or "sem prazo"
+    project = task.get("project") or "Geral"
+    priority = task.get("priority") or "normal"
+    return f"[{task.get('id', '?')}] {task.get('title', '')} · {project} · {due} · {priority}"
+
+
+# Microsoft To Do is the cloud source of truth for personal tasks. The local
+# JSON remains a cache/fallback so Jarvis still works when Outlook is offline.
+OUTLOOK_TASK_LIST_NAME = "Jarvis"
+OUTLOOK_TIMEZONE = "Romance Standard Time"
+TASKS_REMOTE_LAST_SYNC = 0.0
+TASKS_REMOTE_SYNC_TTL = 30.0
+
+
+def _outlook_task_list(token, create=False):
+    import requests
+    try:
+        r = requests.get("https://graph.microsoft.com/v1.0/me/todo/lists",
+                         headers={"Authorization": f"Bearer {token}"}, timeout=12)
+        r.raise_for_status()
+        lists = r.json().get("value", [])
+        for item in lists:
+            if item.get("displayName", "").strip().lower() == OUTLOOK_TASK_LIST_NAME.lower():
+                return item
+        if create:
+            r = requests.post("https://graph.microsoft.com/v1.0/me/todo/lists",
+                              headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                              json={"displayName": OUTLOOK_TASK_LIST_NAME}, timeout=12)
+            r.raise_for_status()
+            return r.json()
+    except Exception as e:  # noqa: BLE001
+        print("Outlook To Do list unavailable:", e)
+    return None
+
+
+def _create_outlook_task(task):
+    try:
+        token, err = _outlook_token()
+    except Exception as e:  # noqa: BLE001
+        print("Outlook To Do auth unavailable:", e)
+        return None
+    if err:
+        return None
+    list_info = _outlook_task_list(token, create=True)
+    if not list_info:
+        return None
+    importance = {"high": "high", "low": "low"}.get(task.get("priority"), "normal")
+    payload = {"title": task.get("title", ""), "importance": importance, "status": "notStarted"}
+    due = task.get("due_date")
+    if due:
+        payload["dueDateTime"] = {"dateTime": f"{due}T00:00:00", "timeZone": OUTLOOK_TIMEZONE}
+    notes = []
+    if task.get("project"):
+        notes.append(f"Projeto: {task['project']}")
+    if task.get("notes"):
+        notes.append(task["notes"])
+    if notes:
+        payload["body"] = {"content": "\n".join(notes), "contentType": "text"}
+    try:
+        import requests
+        r = requests.post(
+            f"https://graph.microsoft.com/v1.0/me/todo/lists/{list_info['id']}/tasks",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=payload, timeout=15)
+        r.raise_for_status()
+        result = r.json()
+        result["list_id"] = list_info["id"]
+        return result
+    except Exception as e:  # noqa: BLE001
+        print("Outlook To Do task creation failed:", e)
+        return None
+
+
+def _complete_outlook_task(task):
+    try:
+        token, err = _outlook_token()
+        if err:
+            return False
+        import requests
+        r = requests.patch(
+            f"https://graph.microsoft.com/v1.0/me/todo/lists/{task['remote_list_id']}/tasks/{task['remote_id']}",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"status": "completed"}, timeout=15)
+        return r.status_code == 200
+    except Exception as e:  # noqa: BLE001
+        print("Outlook To Do task completion failed:", e)
+        return False
+
+
+def _sync_outlook_tasks(force=False):
+    global TASKS_REMOTE_LAST_SYNC
+    now = time.time()
+    if not force and now - TASKS_REMOTE_LAST_SYNC < TASKS_REMOTE_SYNC_TTL:
+        return
+    TASKS_REMOTE_LAST_SYNC = now
+    try:
+        token, err = _outlook_token()
+        if err:
+            return
+        list_info = _outlook_task_list(token, create=True)
+        if not list_info:
+            return
+        import requests
+        r = requests.get(
+            f"https://graph.microsoft.com/v1.0/me/todo/lists/{list_info['id']}/tasks",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"$top": 100}, timeout=15)
+        r.raise_for_status()
+        remote_tasks = r.json().get("value", [])
+        with TASKS_LOCK:
+            local_tasks = _load_tasks()
+            by_remote = {t.get("remote_id"): t for t in local_tasks if t.get("remote_id")}
+            for remote in remote_tasks:
+                local = by_remote.get(remote.get("id"))
+                if local is None:
+                    created = datetime.now().isoformat(timespec="seconds")
+                    local = {"id": f"T-REMOTE-{remote.get('id', '')[:8]}", "created_at": created,
+                             "completed_at": "", "notes": "", "project": "Geral"}
+                    local_tasks.append(local)
+                local["title"] = remote.get("title", "")
+                local["due_date"] = (remote.get("dueDateTime") or {}).get("dateTime", "")[:10]
+                local["priority"] = remote.get("importance", "normal")
+                local["status"] = "done" if remote.get("status") == "completed" else "open"
+                local["source"] = "microsoft_todo"
+                local["remote_id"] = remote.get("id", "")
+                local["remote_list_id"] = list_info["id"]
+            # Existing local-only tasks are migrated once the Outlook connection exists.
+            for local in local_tasks:
+                if not local.get("remote_id") and local.get("status", "open") == "open":
+                    remote = _create_outlook_task(local)
+                    if remote:
+                        local["source"] = "microsoft_todo"
+                        local["remote_id"] = remote.get("id", "")
+                        local["remote_list_id"] = remote.get("list_id", list_info["id"])
+            _save_tasks(local_tasks)
+    except Exception as e:  # noqa: BLE001
+        print("Outlook To Do sync failed:", e)
+
+
+def tool_add_task(args):
+    title = (args.get("title") or "").strip()
+    if not title:
+        return "Não consegui criar a tarefa: falta o título."
+    now = datetime.now()
+    task = {
+        "id": f"T-{now.strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex().upper()}",
+        "title": title,
+        "project": (args.get("project") or "Geral").strip(),
+        "due_date": _normalise_due_date(args.get("due_date")),
+        "priority": (args.get("priority") or "normal").strip().lower(),
+        "status": "open",
+        "notes": (args.get("notes") or "").strip(),
+        "created_at": now.isoformat(timespec="seconds"),
+        "completed_at": "",
+        "source": "local",
+        "remote_id": "",
+        "remote_list_id": "",
+    }
+    remote = _create_outlook_task(task)
+    if remote:
+        task["source"] = "microsoft_todo"
+        task["remote_id"] = remote.get("id", "")
+        task["remote_list_id"] = remote.get("list_id", "")
+    with TASKS_LOCK:
+        tasks = _load_tasks()
+        tasks.append(task)
+        _save_tasks(tasks)
+    where = " no Microsoft To Do" if task["source"] == "microsoft_todo" else " localmente (Outlook To Do ainda não conectado)"
+    return f"Tarefa criada{where}: {_task_label(task)}"
+
+
+def tool_list_tasks(args):
+    status = (args.get("status") or "open").strip().lower()
+    scope = (args.get("scope") or "today").strip().lower()
+    project = (args.get("project") or "").strip().lower()
+    today = datetime.now().strftime("%Y-%m-%d")
+    _sync_outlook_tasks()
+    with TASKS_LOCK:
+        tasks = _load_tasks()
+
+    filtered = []
+    for task in tasks:
+        if status != "all" and task.get("status", "open") != status:
+            continue
+        if project and project not in task.get("project", "").lower():
+            continue
+        due = task.get("due_date", "")
+        if scope in {"today", "hoje"} and due and due > today:
+            continue
+        if scope in {"overdue", "atrasadas", "atrasada"} and (not due or due >= today):
+            continue
+        filtered.append(task)
+
+    filtered.sort(key=lambda t: (t.get("due_date") or "9999-99-99", t.get("priority") != "high", t.get("created_at", "")))
+    if not filtered:
+        return "Nenhuma tarefa encontrada nesse filtro."
+    header = f"{len(filtered)} tarefa(s):"
+    return header + "\n" + "\n".join(_task_label(t) for t in filtered[:20])
+
+
+def tool_complete_task(args):
+    needle = (args.get("task_id") or args.get("query") or "").strip().lower()
+    if not needle:
+        return "Diga o ID ou uma parte do nome da tarefa que deseja concluir."
+    with TASKS_LOCK:
+        tasks = _load_tasks()
+        matches = [t for t in tasks if needle in t.get("id", "").lower() or needle in t.get("title", "").lower()]
+        if not matches:
+            return "Não encontrei essa tarefa."
+        if len(matches) > 1:
+            return "Encontrei mais de uma: " + " | ".join(_task_label(t) for t in matches[:5])
+        task = matches[0]
+        task["status"] = "done"
+        task["completed_at"] = datetime.now().isoformat(timespec="seconds")
+        if task.get("remote_id") and task.get("remote_list_id"):
+            _complete_outlook_task(task)
+        _save_tasks(tasks)
+    return f"Tarefa concluída: {_task_label(task)}"
+
+
+def get_task_summary():
+    _sync_outlook_tasks()
+    today = datetime.now().strftime("%Y-%m-%d")
+    with TASKS_LOCK:
+        tasks = _load_tasks()
+    open_tasks = [t for t in tasks if t.get("status", "open") == "open"]
+    overdue = [t for t in open_tasks if t.get("due_date") and t["due_date"] < today]
+    today_tasks = [t for t in open_tasks if not t.get("due_date") or t.get("due_date") <= today]
+    today_tasks.sort(key=lambda t: (t.get("due_date") or "9999-99-99", t.get("priority") != "high"))
+    return {
+        "open": len(open_tasks),
+        "overdue": len(overdue),
+        "today": len(today_tasks),
+        "items": [{"title": t.get("title", ""), "project": t.get("project", "Geral"),
+                   "due_date": t.get("due_date", ""), "priority": t.get("priority", "normal")}
+                  for t in today_tasks[:5]],
+    }
 
 
 # Método Momento (Move AI agency) lead-gen sheets - same spreadsheet already
@@ -268,22 +554,31 @@ def tool_create_calendar_event(args):
 
     start_dt = datetime(y, mo, d, h, mi)
     end_dt = start_dt + timedelta(minutes=dur)
-    made_mac, made_google = False, False
+    target = (args.get("calendar") or "outlook").strip().lower()
+    made_outlook, made_mac, made_google = False, False, False
+    errors = []
 
-    try:
-        r = subprocess.run(["osascript", "-e", CREATE_EVENT_SCRIPT, title,
-                           str(y), str(mo), str(d), str(h), str(mi), str(dur)],
-                           capture_output=True, text=True, timeout=15)
-        made_mac = r.returncode == 0 and "ok" in r.stdout
-    except Exception as e:  # noqa: BLE001
-        print("Mac event creation failed:", e)
+    if target in {"outlook", "all"}:
+        made_outlook, outlook_error = _create_outlook_event(title, start_dt, end_dt, args)
+        if outlook_error:
+            errors.append(outlook_error)
 
-    made_google = _create_google_event(title, start_dt, end_dt)
+    if target in {"mac", "all"}:
+        try:
+            r = subprocess.run(["osascript", "-e", CREATE_EVENT_SCRIPT, title,
+                               str(y), str(mo), str(d), str(h), str(mi), str(dur)],
+                               capture_output=True, text=True, timeout=15)
+            made_mac = r.returncode == 0 and "ok" in r.stdout
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"Mac event creation failed: {e}")
 
-    if made_mac or made_google:
-        where = " and ".join(w for w, ok in [("Mac Calendar", made_mac), ("Google Calendar", made_google)] if ok)
+    if target in {"google", "all"}:
+        made_google = _create_google_event(title, start_dt, end_dt)
+
+    if made_outlook or made_mac or made_google:
+        where = " and ".join(w for w, ok in [("Outlook Calendar", made_outlook), ("Mac Calendar", made_mac), ("Google Calendar", made_google)] if ok)
         return f"Created '{title}' on {args['date']} at {args['time']} in: {where}."
-    return "(couldn't create the event on either calendar - check Calendar automation permission)"
+    return "(não consegui criar a reunião: " + " | ".join(errors or ["calendário não configurado"]) + ")"
 
 
 CALENDAR_SCRIPT = """
@@ -365,11 +660,12 @@ def tool_read_google_calendar(args):
 
 
 OUTLOOK_CACHE_PATH = JARVIS_HOME / "outlook_token_cache.bin"
-OUTLOOK_SCOPES = ["Calendars.Read"]
+OUTLOOK_SCOPES = ["Calendars.ReadWrite", "Tasks.ReadWrite"]
 
 
-def _outlook_token():
+def _outlook_token(scopes=None):
     import msal
+    scopes = scopes or OUTLOOK_SCOPES
     client_id = CFG.get("outlook_client_id")
     if not client_id:
         return None, ("BLOCKED: Outlook Calendar isn't set up yet - add 'outlook_client_id' "
@@ -380,12 +676,13 @@ def _outlook_token():
     app = msal.PublicClientApplication(
         client_id, authority="https://login.microsoftonline.com/common", token_cache=cache)
     accounts = app.get_accounts()
-    result = app.acquire_token_silent(OUTLOOK_SCOPES, account=accounts[0]) if accounts else None
+    result = app.acquire_token_silent(scopes, account=accounts[0]) if accounts else None
     if cache.has_state_changed:
         OUTLOOK_CACHE_PATH.write_text(cache.serialize())
-    if not result:
+    if not result or "access_token" not in result:
         return None, ("BLOCKED: Outlook Calendar isn't connected yet. Run "
-                        "'python outlook_calendar_setup.py' once from the desktop/ folder.")
+                       "'python outlook_calendar_setup.py' once from the desktop/ folder "
+                       "to re-authorize Calendars.ReadWrite and Tasks.ReadWrite.")
     return result["access_token"], None
 
 
@@ -401,7 +698,7 @@ def tool_read_outlook_calendar(args):
         end = (now.replace(hour=0, minute=0, second=0) + timedelta(days=days)).isoformat()
         r = requests.get(
             "https://graph.microsoft.com/v1.0/me/calendarView",
-            headers={"Authorization": f"Bearer {token}", "Prefer": 'outlook.timezone="UTC"'},
+            headers={"Authorization": f"Bearer {token}", "Prefer": f'outlook.timezone="{OUTLOOK_TIMEZONE}"'},
             params={"startDateTime": start, "endDateTime": end, "$orderby": "start/dateTime"},
             timeout=15)
         r.raise_for_status()
@@ -413,6 +710,39 @@ def tool_read_outlook_calendar(args):
             for e in events)
     except Exception as e:  # noqa: BLE001
         return f"(outlook calendar error: {e})"
+
+
+def _create_outlook_event(title, start_dt, end_dt, args):
+    token, err = _outlook_token()
+    if err:
+        return False, err
+    payload = {
+        "subject": title,
+        "start": {"dateTime": start_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": OUTLOOK_TIMEZONE},
+        "end": {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": OUTLOOK_TIMEZONE},
+        "isReminderOn": True,
+        "reminderMinutesBeforeStart": int(args.get("reminder_minutes", 15)),
+    }
+    if args.get("location"):
+        payload["location"] = {"displayName": args["location"]}
+    if args.get("body"):
+        payload["body"] = {"contentType": "text", "content": args["body"]}
+    attendees = args.get("attendees") or []
+    if isinstance(attendees, str):
+        attendees = [a.strip() for a in attendees.split(",") if a.strip()]
+    if attendees:
+        payload["attendees"] = [{"emailAddress": {"address": email}, "type": "required"}
+                                 for email in attendees]
+    try:
+        import requests
+        r = requests.post(
+            "https://graph.microsoft.com/v1.0/me/calendar/events",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=payload, timeout=15)
+        r.raise_for_status()
+        return True, ""
+    except Exception as e:  # noqa: BLE001
+        return False, f"Outlook event creation failed: {e}"
 
 
 TOOL_DEFS = [
@@ -440,6 +770,25 @@ TOOL_DEFS = [
     {"name": "remember",
      "description": "Store a fact in long-term memory (preferences, decisions, things to remember).",
      "input_schema": {"type": "object", "properties": {"fact": {"type": "string"}}, "required": ["fact"]}},
+    {"name": "add_task",
+     "description": "Create a task in Jarvis's single global task list shared by all projects. Use whenever the user asks to add, remember, register, or schedule a task. Never assume the task belongs to Método Momento unless the user says so.",
+     "input_schema": {"type": "object", "properties": {
+         "title": {"type": "string"},
+         "project": {"type": "string", "description": "Project name, or Geral if it is a general task"},
+         "due_date": {"type": "string", "description": "YYYY-MM-DD, hoje, amanhã, or empty"},
+         "priority": {"type": "string", "description": "low, normal, or high"},
+         "notes": {"type": "string"}}, "required": ["title"]}},
+    {"name": "list_tasks",
+     "description": "List tasks from the global Jarvis task list. Use for questions like what do I have today, what is overdue, or what tasks belong to a project.",
+     "input_schema": {"type": "object", "properties": {
+         "status": {"type": "string", "description": "open, done, or all; default open"},
+         "scope": {"type": "string", "description": "today, overdue, or all; default today"},
+         "project": {"type": "string"}}}},
+    {"name": "complete_task",
+     "description": "Mark one global Jarvis task as completed using its ID or a distinctive part of its title.",
+     "input_schema": {"type": "object", "properties": {
+         "task_id": {"type": "string"},
+         "query": {"type": "string"}}}},
     {"name": "read_calendar",
      "description": "Read events from the Mac Calendar app for the next N days (default 1 = today).",
      "input_schema": {"type": "object", "properties": {
@@ -449,12 +798,17 @@ TOOL_DEFS = [
      "input_schema": {"type": "object", "properties": {
          "days_ahead": {"type": "integer", "description": "How many days ahead to look, 1-14"}}}},
     {"name": "create_calendar_event",
-     "description": "Creates a real event on the Mac Calendar (and Google Calendar if linked) - use whenever asked to schedule, book, or mark something on the calendar.",
+     "description": "Creates a real event in Outlook Calendar by default. Use whenever asked to schedule, book, or mark a meeting. Do not claim it was created until the tool confirms success. Use calendar=mac, google, or all only when explicitly requested.",
      "input_schema": {"type": "object", "properties": {
          "title": {"type": "string"},
          "date": {"type": "string", "description": "ISO date, e.g. 2026-07-09"},
          "time": {"type": "string", "description": "24h HH:MM, e.g. 14:30"},
-         "duration_minutes": {"type": "integer", "description": "default 60"}},
+         "duration_minutes": {"type": "integer", "description": "default 60"},
+         "calendar": {"type": "string", "description": "outlook by default; mac, google, or all"},
+         "location": {"type": "string"},
+         "body": {"type": "string"},
+         "attendees": {"type": "array", "items": {"type": "string"}},
+         "reminder_minutes": {"type": "integer", "description": "default 15"}},
          "required": ["title", "date", "time"]}},
     {"name": "read_metodo_momento",
      "description": "Searches the Método Momento (Move AI agency) lead-gen spreadsheets: the leads pipeline and the outreach message log. Use for questions about a specific lead/company, campaign status, or counts beyond the fixed 'yesterday' stats already on the home screen.",
@@ -464,6 +818,8 @@ TOOL_DEFS = [
 TOOL_FNS = {"run_command": tool_run_command, "screenshot": tool_screenshot,
             "run_claude_code": tool_run_claude_code,
             "search_notes": tool_search_notes, "remember": tool_remember,
+            "add_task": tool_add_task, "list_tasks": tool_list_tasks,
+            "complete_task": tool_complete_task,
             "read_calendar": tool_read_calendar,
             "read_google_calendar": tool_read_google_calendar,
             "read_outlook_calendar": tool_read_outlook_calendar,
@@ -513,7 +869,7 @@ def system_prompt():
     open_cmd = "open" if platform.system() == "Darwin" else "start" if platform.system() == "Windows" else "xdg-open"
     return f"""You are Jarvis: an impeccably polite, dry-witted British butler. Default language is {lang}, but switch fluently to English or French whenever the user speaks or writes in that language, or explicitly asks for it - then switch back once they do. Address the user as "{CFG['user_title']}" occasionally (not every sentence). One genuinely funny line beats three bland ones.
 
-You run as a system assistant on {platform.system()} with real tools: shell, screen capture, notes search, the Mac Calendar, Google Calendar, Outlook Calendar, delegating real coding/writing tasks to Claude Code in a project folder, and long-term memory. Act: when asked to download, open, find or do something on the computer, DO it with run_command instead of explaining how - create a missing folder first if needed rather than giving up. Use run_claude_code (not run_command) for substantial project work - writing plans, code, or documents inside a folder - since it gives Claude Code its own context window for that task. iCloud Drive files (including the Obsidian vault) are regular folders under the user's home directory - read them with run_command like any other file. If something fails, try an alternative path before giving up.
+You run as a system assistant on {platform.system()} with real tools: shell, screen capture, notes search, the Mac Calendar, Google Calendar, Outlook Calendar, a single global task list shared by every project, the Método Momento sales system, delegating real coding/writing tasks to Claude Code in a project folder, and long-term memory. Act: when asked to download, open, find or do something on the computer, DO it with run_command instead of explaining how - create a missing folder first if needed rather than giving up. Use the task tools for personal or project tasks; always include the project when it is known, and use Geral otherwise. Use run_claude_code (not run_command) for substantial project work - writing plans, code, or documents inside a folder - since it gives Claude Code its own context window for that task. iCloud Drive files (including the Obsidian vault) are regular folders under the user's home directory - read them with run_command like any other file. If something fails, try an alternative path before giving up.
 
 Named shortcuts (open the EXACT url below via run_command with `{open_cmd} "URL"` - never guess or alter the URL):
 {shortcuts_block}
@@ -767,22 +1123,32 @@ def audio_loop():
                 oww.reset()
                 if STATE["mode"] == "speaking":
                     interrupt_speech()  # barge-in: talk over Jarvis to stop him
-                if STATE["mode"] in ("idle", "speaking"):
+                if STATE["mode"] in ("idle", "speaking", "thinking"):
                     handle_interaction(stream, whisper, oww)
 
 
 def record_until_silence(stream, max_s=14, silence_s=1.1, lead=None):
+    """Adaptive silence tail: short utterances (like 'para'/'stop') end the
+    recording quickly, while longer speech gets the full silence_s tolerance
+    so a normal thinking pause mid-sentence doesn't cut you off. Without
+    this, bumping silence_s up to stop premature cutoffs also made 'Jarvis,
+    stop' feel sluggish, since the stop-word check only runs after
+    recording ends."""
+    SHORT_UTTERANCE_S = 1.2  # speech shorter than this gets the fast tail
+    FAST_SILENCE_S = 0.35
     chunks = [lead] if lead is not None else []
-    quiet, started = 0, lead is not None
+    quiet, speech_s, started = 0, 0, lead is not None
     for _ in range(int(max_s * SR / FRAME)):
         frame, _ = stream.read(FRAME)
         mono = frame[:, 0]
         chunks.append(mono)
         if _is_speech(mono):
             started, quiet = True, 0
+            speech_s += FRAME / SR
         elif started:
             quiet += FRAME / SR
-            if quiet >= silence_s:
+            threshold = FAST_SILENCE_S if speech_s < SHORT_UTTERANCE_S else silence_s
+            if quiet >= threshold:
                 break
     audio = np.concatenate(chunks).astype(np.float32) / 32768.0
     peak = np.abs(audio).max()
@@ -798,15 +1164,16 @@ def handle_interaction(stream, whisper, oww, lead=None):
     freezing for the several seconds an LLM round trip takes."""
     global followup_until
     followup_until = 0.0
+    generation = _new_interaction_generation()
     if lead is None:
         _ding()
     set_state("listening")
     audio = record_until_silence(stream, lead=lead)
     oww.reset()
-    threading.Thread(target=process_utterance, args=(whisper, audio), daemon=True).start()
+    threading.Thread(target=process_utterance, args=(whisper, audio, generation), daemon=True).start()
 
 
-def process_utterance(whisper, audio):
+def process_utterance(whisper, audio, generation):
     global followup_until
     set_state("thinking")
     # auto-detect (pt/en/fr etc.) instead of a fixed language, so switching
@@ -825,6 +1192,9 @@ def process_utterance(whisper, audio):
     if STOP_TRIGGERS.search(text):
         interrupt_speech()
         set_state("idle")
+        return
+
+    if not _interaction_is_current(generation):
         return
 
     switch_paid = re.compile(r"\b(mudar|trocar|use|usar|ative|ativar|coloque|colocar)\s+(para\s+o\s+)?(modelo\s+)?(pago|claude|paid)\b", re.I)
@@ -862,7 +1232,8 @@ def process_utterance(whisper, audio):
         return
 
     if BRIEFING_TRIGGERS.search(text):
-        run_daily_briefing()
+        open_home_screen()
+        threading.Thread(target=run_daily_briefing, daemon=True).start()
         followup_until = time.time() + FOLLOWUP_WINDOW
         return
     set_state("thinking", text)
@@ -870,6 +1241,9 @@ def process_utterance(whisper, audio):
         answer = think(text)
     except Exception as e:  # noqa: BLE001
         answer = f"Brain hiccup, {CFG['user_title']}: {e}"
+    if not _interaction_is_current(generation):
+        set_state("idle")
+        return
     print(f"🎩 {answer}")
     speak(answer)
     followup_until = time.time() + FOLLOWUP_WINDOW
@@ -966,6 +1340,7 @@ class OrbApi:
             "weather": CACHED_HOME_DATA["weather"],
             "birthdays": CACHED_HOME_DATA["birthdays"],
             "outreach": CACHED_HOME_DATA["outreach"],
+            "tasks": get_task_summary(),
             "topic": HOME_MODE["topic"],
             "state": STATE,
         }
@@ -973,11 +1348,14 @@ class OrbApi:
     def show_briefing(self):
         if HOME_MODE["active"]:
             return "already_active"
+        open_home_screen()
         threading.Thread(target=run_daily_briefing, daemon=True).start()
         return "ok"
 
     def close_home(self):
+        interrupt_speech()  # the X button must silence him too, not just hide the screen
         HOME_MODE["active"] = False
+        set_state("idle")
         return "ok"
 
 
@@ -1107,71 +1485,100 @@ CACHED_HOME_DATA = {
 
 
 def fetch_yesterday_outreach_stats():
+    """Real numbers only - no guessing.
+
+    The message log (gid=msg_gid) has no 'who sent it' column at all, so the
+    old code was silently guessing the sender from greeting words in the
+    message text ('Hi '/'Olá ' etc.) - on the actual message templates that
+    never matched, which is why it reported ~3-4 sent when 17 real messages
+    went out yesterday (13 'enviado' + 4 'follow-up'; 6 more failed and
+    needed a manual resend, which wasn't being surfaced at all).
+
+    The leads sheet DOES reliably track who sent the first message per lead
+    ('Gestão' contains '✅ Enviado por Thay' / '✅ Enviado por Felipe'), so
+    that's the real source for the per-person split.
+
+    Replies are the other real bug: 'positives' was counting leads whose
+    Gestão is 'Em conversa' but only among leads *created* yesterday - a
+    lead who replied to a follow-up sent yesterday, after being added
+    weeks ago, was invisible. There's no per-reply timestamp in this sheet,
+    so the honest fix is to report the live total of active conversations
+    right now, not a yesterday-dated snapshot that doesn't correspond to
+    when someone actually replied.
+    """
     import csv
     import requests
     sheet_id = "1eC2im7e5U3IvJmBm783t0X-xAXi8RSmqowY-41sfDmM"
     leads_gid = "1547340779"
     msg_gid = "325599469"
-    
+
     yesterday = datetime.now() - timedelta(days=1)
-    y_str_1 = yesterday.strftime("%d/%m/%Y")
-    y_str_2 = yesterday.strftime("%Y-%m-%d")
-    y_str_1_alt = f"{yesterday.day}/{yesterday.month}/{yesterday.year}"
-    
-    target_dates = {y_str_1, y_str_2, y_str_1_alt}
-    
+    target_dates = {yesterday.strftime("%d/%m/%Y"), yesterday.strftime("%Y-%m-%d"),
+                    f"{yesterday.day}/{yesterday.month}/{yesterday.year}"}
+
+    messages_sent = 0
+    messages_failed = 0
+    followups = 0
     felipe_sent = 0
     thayna_sent = 0
     positives = 0
     negatives = 0
-    followups = 0
-    
+
     try:
         r_msg = requests.get(f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={msg_gid}", timeout=8)
         if r_msg.status_code == 200:
-            lines = r_msg.text.splitlines()
-            reader = csv.reader(lines)
-            next(reader, None)
+            reader = csv.reader(r_msg.text.splitlines())
+            headers = next(reader, [])
+            h = {name.strip().lower(): i for i, name in enumerate(headers)}
+            date_i, status_i = h.get("data", 5), h.get("status_envio", 3)
             for row in reader:
-                if len(row) > 5 and row[5]:
-                    row_date = row[5].split()[0]
-                    if row_date in target_dates:
-                        status = row[3].lower() if len(row) > 3 else ""
-                        msg_text = row[4] if len(row) > 4 else ""
-                        if "enviado" in status or "sucesso" in status:
-                            if "felipe" in msg_text.lower() or "hi " in msg_text.lower() or "hello " in msg_text.lower():
-                                felipe_sent += 1
-                            elif "thayna" in msg_text.lower() or "thayná" in msg_text.lower() or "olá " in msg_text.lower():
-                                thayna_sent += 1
-                        if any(kw in msg_text.lower() for kw in ["follow", "feedback", "conseguiu", "olhada", "relembrar"]):
-                            followups += 1
-                            
+                if len(row) <= date_i or not row[date_i]:
+                    continue
+                if row[date_i].split()[0] not in target_dates:
+                    continue
+                status = row[status_i].lower() if len(row) > status_i else ""
+                if "follow-up" in status or "followup" in status:
+                    followups += 1
+                    messages_sent += 1
+                elif "enviado" in status or "sucesso" in status:
+                    messages_sent += 1
+                elif "falha" in status or "erro" in status:
+                    messages_failed += 1
+
         r_leads = requests.get(f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={leads_gid}", timeout=8)
         if r_leads.status_code == 200:
-            lines = r_leads.text.splitlines()
-            reader = csv.reader(lines)
-            next(reader, None)
+            reader = csv.reader(r_leads.text.splitlines())
+            headers = next(reader, [])
+            h = {name.strip().lower(): i for i, name in enumerate(headers)}
+            date_i, gestao_i = h.get("data", 1), h.get("gestão", 13)
             for row in reader:
-                if len(row) > 1 and row[1]:
-                    row_date = row[1].strip()
-                    if row_date in target_dates:
-                        gestao = row[13].strip() if len(row) > 13 else ""
-                        notas = row[14].strip() if len(row) > 14 else ""
-                        if any(kw in gestao.lower() for kw in ["conversa", "call marcada"]):
-                            positives += 1
-                        elif any(kw in gestao.lower() for kw in ["nurture", "reprovado"]):
-                            negatives += 1
-                        elif any(kw in notas.lower() for kw in ["não tem interesse", "sem interesse", "recusou", "rejeitou"]):
-                            negatives += 1
+                gestao = row[gestao_i].strip().lower() if len(row) > gestao_i else ""
+                if not gestao:
+                    continue
+                # who-sent-the-first-message split: only meaningful scoped to
+                # leads actually created yesterday (it's a per-lead fact)
+                if len(row) > date_i and row[date_i].strip() in target_dates:
+                    if "felipe" in gestao:
+                        felipe_sent += 1
+                    elif "thay" in gestao:
+                        thayna_sent += 1
+                # live pipeline state: NOT date-filtered, so a reply that
+                # came in today to a lead from last week still counts
+                if "conversa" in gestao or "call marcada" in gestao:
+                    positives += 1
+                elif "cancelado" in gestao or "reprovado" in gestao or "nurture" in gestao:
+                    negatives += 1
     except Exception as e:
         print("[Cache] Outreach stats refresh failed:", e)
-        
+
     return {
         "felipe_sent": felipe_sent,
         "thayna_sent": thayna_sent,
+        "messages_sent": messages_sent,
+        "messages_failed": messages_failed,
         "positives": positives,
         "negatives": negatives,
-        "followups": followups
+        "followups": followups,
     }
 
 
@@ -1276,6 +1683,47 @@ def _default_home(win):
     return sw - ORB_SIZE - MARGIN, sh - ORB_SIZE - MARGIN
 
 
+def configure_window_for_all_spaces(win):
+    """Make the orb/home follow the user across every macOS Space (Desktop
+    1, 2, 3...) instead of only being visible on whichever Space it was
+    created on - pywebview's Window object has no public '.native' handle,
+    the real NSWindow lives in the cocoa backend's own BrowserView registry,
+    keyed by the window's uid.
+
+    AppKit objects are not thread-safe: mutating the NSWindow from this
+    background thread (orb_position_loop) either silently no-ops or crashes
+    the process outright (verified - SIGABRT) depending on timing, the same
+    class of bug as the earlier toggle_fullscreen() freeze. The fix is the
+    same: hop onto Cocoa's main run loop via PyObjCTools.AppHelper.callAfter
+    instead of touching the NSWindow directly from here."""
+    if platform.system() != "Darwin":
+        return
+
+    def _apply():
+        try:
+            import AppKit
+            from webview.platforms.cocoa import BrowserView
+            instance = BrowserView.instances.get(win.uid)
+            native = getattr(instance, "window", None)
+            if native is None:
+                print("[Window] Could not find the native NSWindow for uid", win.uid)
+                return
+            can_join = getattr(AppKit, "NSWindowCollectionBehaviorCanJoinAllSpaces", 1 << 0)
+            fullscreen_aux = getattr(AppKit, "NSWindowCollectionBehaviorFullScreenAuxiliary", 1 << 8)
+            native.setCollectionBehavior_(can_join | fullscreen_aux)
+            native.setHidesOnDeactivate_(False)
+            native.setLevel_(getattr(AppKit, "NSFloatingWindowLevel", 3))
+            print("[Window] Jarvis configured for all macOS Spaces.")
+        except Exception as e:  # noqa: BLE001
+            print("[Window] Could not configure all-Spaces behavior:", e)
+
+    try:
+        from PyObjCTools import AppHelper
+        AppHelper.callAfter(_apply)
+    except Exception as e:  # noqa: BLE001
+        print("[Window] Could not schedule all-Spaces behavior:", e)
+
+
 HOME_MODE = {"active": False, "topic": None}
 BRIEFING_RUNNING = False
 BRIEFING_TRIGGERS = re.compile(
@@ -1283,8 +1731,15 @@ BRIEFING_TRIGGERS = re.compile(
     r"atualiza[cç][oõ]es\s+do\s+dia|panorama\s+do\s+dia|"
     r"(daily\s+)?(overview|briefing)|open\s+(your\s+)?home)\b", re.I)
 STOP_TRIGGERS = re.compile(
-    r"^\s*(para|pare|parar|cal[ae]|cala\s*a?\s*boca|chega|sil[eê]n[cç]io|"
-    r"stop|shut\s*up|quiet|be\s+quiet|enough)\s*[.!]?\s*$", re.I)
+    r"^\s*(?:(?:hey|ei)\s+)?(?:jarvis[\s,;:.-]*)?(?:por\s+favor[\s,;:.-]*)?"
+    r"(para|pare|parar|cal[ae]|cala\s*a?\s*boca|chega|sil[eê]n[cç]io|"
+    r"stop|shut\s*up|quiet|be\s+quiet|enough)\b.*$", re.I)
+
+
+def open_home_screen():
+    """Request the home window immediately; the spoken briefing can follow in a thread."""
+    HOME_MODE["active"] = True
+    HOME_MODE["topic"] = None
 
 
 def run_daily_briefing():
@@ -1329,19 +1784,16 @@ def run_daily_briefing():
         outreach = CACHED_HOME_DATA["outreach"]
         outreach_text = None
         if outreach:
-            total_sent = outreach["felipe_sent"] + outreach["thayna_sent"]
-            if total_sent > 0:
-                outreach_text = (f"Ontem na automação de sites, enviamos {total_sent} mensagens no total. "
-                                 f"O Felipe enviou {outreach['felipe_sent']} e a Thayná enviou {outreach['thayna_sent']}. "
-                                 if pt else
-                                 f"Yesterday in site automation, we sent {total_sent} messages in total. "
-                                 f"Felipe sent {outreach['felipe_sent']} and Thayna sent {outreach['thayna_sent']}. ")
-                if outreach["positives"] > 0:
-                    outreach_text += (f"Tivemos {outreach['positives']} resposta{'s' if outreach['positives'] != 1 else ''} positiva{'s' if outreach['positives'] != 1 else ''}."
-                                     if pt else
-                                     f"We had {outreach['positives']} positive reply/replies.")
-                else:
-                    outreach_text += ("Nenhuma resposta positiva." if pt else "No positive replies.")
+            sent = outreach.get("messages_sent", 0)
+            failed = outreach.get("messages_failed", 0)
+            if sent > 0 or failed > 0:
+                outreach_text = (f"Ontem na automação de sites, enviamos {sent} mensagens." if pt
+                                 else f"Yesterday in site automation, we sent {sent} messages.")
+                if failed:
+                    outreach_text += (f" {failed} falharam e precisam ser reenviadas manualmente." if pt
+                                      else f" {failed} failed and need a manual resend.")
+                outreach_text += (f" Ao todo temos {outreach['positives']} conversas ativas agora." if pt
+                                  else f" We currently have {outreach['positives']} active conversations.")
             else:
                 outreach_text = ("Nenhuma mensagem de automação ontem." if pt else "No automation messages yesterday.")
 
@@ -1412,6 +1864,7 @@ def orb_position_loop(win):
     for ordinary questions. The full-screen HUD 'home' screen is separate:
     it only opens when HOME_MODE['active'] is set (daily briefing request or
     a triple-click), takes over fullscreen, then hands control back here."""
+    configure_window_for_all_spaces(win)
     home = (CFG["orb_x"], CFG["orb_y"])
     if home[0] is None:
         home = _default_home(win)

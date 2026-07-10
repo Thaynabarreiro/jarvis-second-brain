@@ -19,7 +19,7 @@ import msal
 JARVIS_HOME = Path.home() / ".jarvis"
 CONFIG_PATH = JARVIS_HOME / "config.json"
 CACHE_PATH = JARVIS_HOME / "outlook_token_cache.bin"
-SCOPES = ["Calendars.Read"]
+SCOPES = ["Calendars.ReadWrite", "Tasks.ReadWrite"]
 
 
 def main():
